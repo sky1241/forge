@@ -71,18 +71,52 @@ def test_purge_function_skipped_by_name(forge):
     assert is_destr
 
 
-def test_bootstrap_function_skipped_by_name(forge):
-    src = "def bootstrap_db(repo_path): pass"
-    node = _build_node(forge, src, "bootstrap_db")
-    is_destr, _ = forge._is_destructive_function(node, src)
-    assert is_destr
+# NOTE: ^bootstrap and ^generate_ patterns were removed (they over-flag
+# pure helpers like generate_password_hash, generate_uuid, bootstrap_app).
+# The two tests below pin the new behavior: pure functions with these
+# prefixes are NOT flagged. The AST scan still catches the genuinely
+# destructive ones via their write/subprocess calls.
+
+def test_generate_password_hash_not_skipped(forge):
+    """generate_password_hash from werkzeug is pure compute (hashlib).
+    Earlier versions over-flagged it via the ^generate_ pattern."""
+    src = "def generate_password_hash(password, method='sha256'): return hashlib.sha256(password.encode()).hexdigest()"
+    node = _build_node(forge, src, "generate_password_hash")
+    is_destr, reason = forge._is_destructive_function(node, src)
+    assert not is_destr, f"pure compute helper should not be flagged; reason={reason}"
 
 
-def test_generate_function_skipped_by_name(forge):
-    src = "def generate_report(repo_path, files, config): pass"
+def test_bootstrap_init_function_not_skipped(forge):
+    """bootstrap_app() that just returns a configured object is pure init,
+    no FS writes — must not be flagged."""
+    src = "def bootstrap_app(config): app = Flask(__name__); return app"
+    node = _build_node(forge, src, "bootstrap_app")
+    is_destr, reason = forge._is_destructive_function(node, src)
+    assert not is_destr, f"pure init should not be flagged; reason={reason}"
+
+
+def test_generate_with_real_write_still_caught(forge):
+    """A generate_*() that does write to disk is still caught — by the
+    AST scan (write_text), not the (removed) name pattern."""
+    src = (
+        "def generate_report(target_path):\n"
+        "    out = Path(target_path) / 'report.html'\n"
+        "    out.write_text('<html></html>')\n"
+    )
     node = _build_node(forge, src, "generate_report")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node, src)
     assert is_destr
+    assert "write_text" in reason
+
+
+def test_strip_url_with_str_replace_not_skipped(forge):
+    """scrapy.utils.url.strip_url uses str.replace() — pure compute. Earlier
+    versions over-flagged it via the .replace() call pattern (which is
+    actually Path.replace() for renaming files)."""
+    src = "def strip_url(url): return url.replace('http://', 'https://')"
+    node = _build_node(forge, src, "strip_url")
+    is_destr, reason = forge._is_destructive_function(node, src)
+    assert not is_destr, f"str.replace() is pure; reason={reason}"
 
 
 def test_hook_suffix_skipped(forge):

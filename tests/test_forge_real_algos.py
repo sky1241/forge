@@ -541,6 +541,89 @@ class TestPytestParserRegression:
         assert forge._parse_pytest_failures(out) == []
 
 
+class TestForgeTestFilterPlumbing:
+    """Pin: FORGE_TEST_FILTER must reach every sub-command's pytest invocation.
+    Without this, a noisy target repo (with pre-existing unrelated failures)
+    can't be narrowed by --locate or --bisect — they run unfiltered pytest
+    and lose the slice the user actually cares about (real bug surfaced
+    during the scrapy field test in BIG_DEMO.md)."""
+
+    def test_helper_returns_none_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("FORGE_TEST_FILTER", raising=False)
+        assert forge._get_test_filter() is None
+
+    def test_helper_returns_value_when_env_set(self, monkeypatch):
+        monkeypatch.setenv("FORGE_TEST_FILTER", "errback")
+        assert forge._get_test_filter() == "errback"
+
+    def test_helper_strips_whitespace_and_treats_empty_as_none(self, monkeypatch):
+        monkeypatch.setenv("FORGE_TEST_FILTER", "  ")
+        assert forge._get_test_filter() is None
+        monkeypatch.setenv("FORGE_TEST_FILTER", "  spam  ")
+        assert forge._get_test_filter() == "spam"
+
+    def test_combine_k_filter_with_both(self):
+        assert forge._combine_k_filter("errback", "test_x") == "(errback) and (test_x)"
+
+    def test_combine_k_filter_with_neither(self):
+        assert forge._combine_k_filter(None, None) is None
+
+    def test_combine_k_filter_with_only_one(self):
+        assert forge._combine_k_filter("errback", None) == "errback"
+        assert forge._combine_k_filter(None, "test_x") == "test_x"
+
+    def test_run_tests_passes_filter_to_pytest(self, tmp_path, monkeypatch):
+        """run_tests() must include `-k <filter>` in the pytest command when
+        FORGE_TEST_FILTER is set."""
+        _git_init(tmp_path)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_x.py").write_text(
+            "def test_pass(): assert True\n", encoding="utf-8"
+        )
+        _git_commit(tmp_path)
+        monkeypatch.setenv("FORGE_TEST_FILTER", "errback")
+        captured = {}
+        real_run = subprocess.run
+
+        def spy_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and "-m" in cmd and "pytest" in cmd:
+                captured["cmd"] = cmd
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(forge.subprocess, "run", spy_run)
+        forge.run_tests(tmp_path)
+        cmd = captured.get("cmd", [])
+        assert "-k" in cmd, f"-k missing from pytest cmd: {cmd}"
+        idx = cmd.index("-k")
+        assert cmd[idx + 1] == "errback", f"filter not passed; got {cmd[idx + 1]!r}"
+
+    def test_bisect_combines_filter_and_test_name(self, tmp_path, monkeypatch):
+        """bisect_test() must AND the FORGE_TEST_FILTER with the user's test name."""
+        _git_init(tmp_path)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_x.py").write_text(
+            "def test_one(): assert False\n"
+            "def test_two(): assert True\n",
+            encoding="utf-8",
+        )
+        _git_commit(tmp_path)
+        monkeypatch.setenv("FORGE_TEST_FILTER", "errback")
+        captured_filters = []
+        real_run = subprocess.run
+
+        def spy_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and "-m" in cmd and "pytest" in cmd and "-k" in cmd:
+                idx = cmd.index("-k")
+                captured_filters.append(cmd[idx + 1])
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(forge.subprocess, "run", spy_run)
+        forge.bisect_test(tmp_path, "test_one")
+        assert captured_filters, "no -k filter in any bisect pytest invocation"
+        assert any("(errback) and (test_one)" in f for f in captured_filters), \
+            f"expected combined filter; got {captured_filters!r}"
+
+
 class TestMutationTimeoutHonest:
     """Pin run_mutation: timeouts must NOT be counted as killed (was a lie),
     score must be 'n/a' when every mutant timed out, and the per-mutant timeout

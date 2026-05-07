@@ -492,7 +492,7 @@ def run_tests(root, verbose=False):
     except ImportError:
         pass
     # Optional pytest -k expression via env var (e.g. to skip slow integration tests)
-    test_filter = os.environ.get("FORGE_TEST_FILTER")
+    test_filter = _get_test_filter()
     if test_filter:
         cmd.extend(["-k", test_filter])
 
@@ -553,6 +553,22 @@ def run_tests(root, verbose=False):
         "duration": round(duration, 1),
         "raw_output": output if verbose else None
     }
+
+
+def _get_test_filter():
+    """Return the FORGE_TEST_FILTER env var as a pytest -k expression, or
+    None. All sub-commands that invoke pytest should honor this so a noisy
+    target repo (with unrelated pre-existing failures) can be narrowed to
+    the slice the user actually cares about."""
+    f = os.environ.get("FORGE_TEST_FILTER", "").strip()
+    return f or None
+
+
+def _combine_k_filter(test_filter, extra_filter):
+    """Combine two pytest -k expressions with logical AND. Either may be None."""
+    if test_filter and extra_filter:
+        return f"({test_filter}) and ({extra_filter})"
+    return test_filter or extra_filter
 
 
 def _parse_pytest_failures(output):
@@ -891,10 +907,13 @@ def show_heatmap(root):
 def bisect_test(root, test_name):
     """Auto git-bisect to find which commit broke a specific test.
     Zeller 1999 — Delta Debugging + binary search on commits."""
-    # Verify test exists and currently fails
+    # Verify test exists and currently fails. Combine FORGE_TEST_FILTER (if
+    # any) with the user-provided test_name via AND, so a noisy target repo
+    # with pre-existing failures stays narrowed to the slice the user picked.
     print(f"  Verifying {test_name} currently fails...")
+    k_expr = _combine_k_filter(_get_test_filter(), test_name)
     cmd_test = [sys.executable, "-m", "pytest", "-x", "-q", "--tb=line",
-                "--no-header", "-k", test_name]
+                "--no-header", "-k", k_expr]
     result = subprocess.run(cmd_test, capture_output=True, text=True,
                            cwd=str(root), encoding="utf-8", errors="replace")
     if "failed" not in result.stdout.lower() and "error" not in result.stdout.lower():
@@ -1527,36 +1546,55 @@ def minimize_input(root, test_name, input_file):
 # pytest.skip(). Override with --include-destructive at the CLI level.
 
 _DESTRUCTIVE_NAME_PATTERNS = [
-    # filesystem mutations
+    # filesystem mutations — clearly destructive prefixes only
     r"^scrub_", r"^purge_", r"^install_", r"^uninstall_",
-    r"^bootstrap", r"^generate_", r"^create_", r"^delete_", r"^remove_",
-    r"^save", r"^write_", r"_write$", r"_save$",
+    r"^delete_", r"^remove_",
+    r"^write_", r"_write$", r"_save$",
     r"^migrate", r"^upgrade", r"^downgrade",
     r"^rebuild", r"^reset_", r"^cleanup", r"^prune",
     # database / state mutations
     r"^drop_", r"^truncate", r"^insert_", r"^update_",
     # network / external side effects
-    r"^fetch_", r"^download", r"^upload", r"^send_", r"^post_", r"^put_",
+    r"^download", r"^upload", r"^send_", r"^post_", r"^put_",
     r"^sync_", r"_sync$", r"^pull_", r"^push_",
     # process / subprocess
     r"^run_", r"^exec_", r"^spawn_", r"^kill_",
     # hooks (anything in hook context is side-effecting by definition)
     r"_hook$", r"^hook_",
+    # NOTE: removed ^generate_, ^create_, ^bootstrap, ^save, ^fetch_ —
+    # they over-match pure-compute helpers (generate_password_hash,
+    # generate_uuid, create_response, fetch_one). The AST scan below
+    # catches the genuinely destructive ones via their write/subprocess
+    # calls, so we don't lose real coverage by being more conservative
+    # with name heuristics.
 ]
 
-# AST node types / call patterns that indicate write side effects
+# AST node types / call patterns that indicate write side effects.
+# Only methods whose semantics are unambiguously destructive across the
+# common stdlib + popular libraries. Methods that are str-pure on str
+# but Path-destructive on Path (like .replace) are excluded — disambiguating
+# them needs type info we don't have, and the false-positive cost outweighs
+# the false-negative cost for these.
 _DESTRUCTIVE_CALLS = {
-    # Path / file writers
+    # Path / file writers (Path/file methods, no str overload conflict)
     "write_text", "write_bytes", "writelines", "touch", "mkdir", "makedirs",
-    "rename", "replace", "rmtree", "remove", "unlink", "rmdir", "chmod", "chown",
-    # Subprocess / shell
+    "rmtree", "unlink", "rmdir", "chmod", "chown",
+    # Subprocess / shell — always destructive
     "system", "popen", "call", "check_call", "check_output", "run",
-    # urllib / requests / httpx — network writes
-    "urlopen", "urlretrieve", "post", "put", "patch", "delete",
-    # SQLite / DB writes
+    # urllib — network reads with side effects to disk
+    "urlretrieve",
+    # SQLite — direct DB writes
     "executescript", "executemany",
-    # Logging side effects to disk
-    "dump", "dumps_to_file",
+    # Removed (ambiguous, frequently pure):
+    # - "replace": str.replace (pure) vs Path.replace (rename file)
+    # - "rename": dict-like .rename usage exists (e.g. pandas)
+    # - "remove": str/list/dict .remove are pure (mutate in-place but local)
+    # - "delete": HTTP method + dict .delete (rare) — too overloaded
+    # - "patch": unittest.mock.patch is pure
+    # - "post", "put": HTTP methods are usually fine in test gen
+    # - "run": subprocess.run kept via call/check_call; .run on async/Task is pure
+    # - "dump", "dumps_to_file": json.dump etc. write to a passed handle, not
+    #   to a fixed location — fuzzing them with bad data won't corrupt the repo
 }
 
 # If any positional/keyword argument has one of these names, the function very
@@ -2070,6 +2108,12 @@ def fault_locate(root):
     os.makedirs(str(root / FORGE_DIR), exist_ok=True)
     cmd = [sys.executable, "-m", "pytest"] + [str(f) for f in test_files] + \
           ["--cov", "--cov-context=test", "-v", "--tb=no", "--no-header"]
+    # Honor FORGE_TEST_FILTER so this command's failure picture stays in
+    # sync with the rest of forge (run_tests, --flaky, etc.).
+    test_filter = _get_test_filter()
+    if test_filter:
+        cmd.extend(["-k", test_filter])
+        print(f"  (filtered by FORGE_TEST_FILTER={test_filter!r})")
 
     print("  Running tests with per-test coverage...")
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(root),
