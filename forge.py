@@ -2148,6 +2148,22 @@ def fault_locate(root):
             failed_tests.add(test_id)
 
     if not failed_tests:
+        # Distinguish "really no failures" from "pytest crashed before running".
+        # Same pattern as run_tests: when returncode != 0 AND nothing ran, surface
+        # the runner error instead of misleading the user with "no failing tests".
+        # Found 2026-05-08 on marshmallow: tests/mypy_test_cases/ caused 2
+        # collection ERRORs → exit code 2 → fault_locate said "no failing tests"
+        # while a real failure was masked.
+        if r.returncode != 0 and not passed_tests:
+            tail = "\n".join((r.stdout + r.stderr).splitlines()[-15:])
+            print("\n  PYTEST RUNNER ERROR (during --locate):")
+            for line in tail.splitlines():
+                print(f"    {line}")
+            print(f"  exit code: {r.returncode}")
+            print(f"  Hint: a test file in your repo crashed at collection")
+            print(f"  (missing dep, plugin conflict, mypy_test_cases/ not for normal pytest...).")
+            print(f"  Try FORGE_TEST_FILTER='specific_test' or fix the broken collector.\n")
+            return
         print("  No failing tests. Nothing to localize.")
         return
 

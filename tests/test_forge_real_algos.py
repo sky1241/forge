@@ -541,6 +541,50 @@ class TestPytestParserRegression:
         assert forge._parse_pytest_failures(out) == []
 
 
+class TestFaultLocateSurfacesCollectionErrors:
+    """Pin: --locate must NOT silently say 'no failing tests' when pytest
+    actually crashed at collection (exit code 2, 0 PASSED, 0 FAILED).
+
+    Real-world case found 2026-05-08 on marshmallow #2961 cycle 2:
+    tests/mypy_test_cases/test_*.py crashed at collection (those files are
+    meant for mypy plugin, not normal pytest), pytest exited 2, --locate
+    saw 0 failed, said 'no failing tests' → masked a real bug while a
+    legitimate failure existed in another test file.
+
+    Same anti-mensonge-silencieux pattern as the run_tests parser fix
+    (commit bf4a9d7) and the mutate timeout fix (commit f465fda)."""
+
+    def test_locate_surfaces_collection_error(self, tmp_path, monkeypatch, capsys):
+        """When pytest exits non-zero with no PASSED/FAILED entries, --locate
+        prints PYTEST RUNNER ERROR + the tail, instead of 'no failing tests'."""
+        # Need real layout: tests/ + a "broken" test file that pytest can find
+        # but that causes collection error.
+        _git_init(tmp_path)
+        (tmp_path / "tests").mkdir()
+        # Valid test (would pass normally)
+        (tmp_path / "tests" / "test_ok.py").write_text(
+            "def test_ok(): assert True\n", encoding="utf-8"
+        )
+        # Broken collector — pytest exits 2 with "errors during collection"
+        (tmp_path / "tests" / "test_broken.py").write_text(
+            "import nonexistent_module_xyz123_xyz456  # collection ERROR\n",
+            encoding="utf-8",
+        )
+        _git_commit(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        forge.fault_locate(tmp_path)
+        out = capsys.readouterr().out
+        # The fix: collection error must be surfaced, not silently swallowed.
+        # Old buggy behavior printed: "No failing tests. Nothing to localize."
+        assert "PYTEST RUNNER ERROR" in out, (
+            f"--locate must surface collection errors. Old behavior masked them.\nGot:\n{out}"
+        )
+        # And it must NOT lie with "no failing tests"
+        assert "No failing tests" not in out, (
+            f"--locate must NOT say 'no failing tests' when pytest crashed.\nGot:\n{out}"
+        )
+
+
 class TestFindTestsExcludesBenchmarks:
     """Pin: find_tests() must exclude bench/ and benchmarks/ directories by
     default. Mutation testing measures correctness, not performance — and
