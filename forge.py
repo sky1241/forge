@@ -485,15 +485,20 @@ def run_tests(root, verbose=False):
         return {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0, "details": [], "duration": 0}
 
     start = time.time()
-    # Pass "tests/" directory to pytest (avoids Windows command-line length limits)
-    # find_tests() already validated that tests exist under root
-    cmd = [
-        sys.executable, "-m", "pytest", "tests/",
-        "-v", "--tb=short",
-        "--timeout=30",  # Per-test timeout: prevents API/network hangs from blocking forge
-        # Skip tests that require external API (Anthropic, Ollama) — they hang on timeout
+    # Pass tests/ if it exists, else pass discovered files individually
+    test_target = "tests/" if (root / "tests").is_dir() else [str(t.relative_to(root)) for t in test_files]
+    cmd = [sys.executable, "-m", "pytest"]
+    cmd.extend([test_target] if isinstance(test_target, str) else test_target)
+    cmd.extend(["-v", "--tb=short"])
+    # --timeout requires pytest-timeout; skip if not installed (silent crash otherwise)
+    try:
+        import pytest_timeout  # noqa: F401
+        cmd.append("--timeout=30")
+    except ImportError:
+        pass
+    cmd.extend([
         "-k", "not (real_api or real_llm or B13Claude or tier1_b1 or tier1_full or lazy_real or sync_tls or CorpusFull)",
-    ]
+    ])
 
     try:
         result = subprocess.run(
@@ -501,6 +506,7 @@ def run_tests(root, verbose=False):
             timeout=600, encoding="utf-8", errors="replace"
         )
         output = result.stdout + result.stderr
+        rc = result.returncode
     except subprocess.TimeoutExpired:
         return {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0,
                 "details": [{"test": "TIMEOUT", "status": "ERROR", "msg": "Tests exceeded 5min"}],
@@ -526,11 +532,18 @@ def run_tests(root, verbose=False):
         errors = int(summary_e.group(1)) if summary_e else 0
         skipped = int(summary_s.group(1)) if summary_s else 0
     else:
-        # No summary line (timeout or crash) — count from verbose output
+        # No summary line: pytest never ran (collection error, missing plugin, bad CLI)
+        # Surface the failure instead of silently reporting "NO TESTS FOUND"
         passed = len(re.findall(r" PASSED", output))
         failed = len(re.findall(r" FAILED", output))
-        errors = 0  # Don't count ERROR in tracebacks
+        errors = 0
         skipped = len(re.findall(r" SKIPPED", output))
+        if passed == 0 and failed == 0 and skipped == 0 and rc != 0:
+            tail = "\n".join(output.splitlines()[-15:])
+            return {"total": 0, "passed": 0, "failed": 0, "errors": 1, "skipped": 0,
+                    "details": [{"test": "PYTEST_RUNNER", "status": "ERROR", "msg": tail}],
+                    "duration": round(time.time() - start, 1),
+                    "raw_output": output}
 
     # Extract failure details
     details = []
@@ -578,6 +591,15 @@ def print_report(results, baseline=None):
     duration = results["duration"]
 
     if total == 0:
+        if results.get("errors", 0) > 0 and results.get("details"):
+            print("\n  PYTEST RUNNER ERROR:\n")
+            for d in results["details"]:
+                print(f"    [{d['status']}] {d['test']}")
+                if d.get("msg"):
+                    for line in d["msg"].splitlines():
+                        print(f"      {line}")
+            print()
+            return
         print("\n  NO TESTS FOUND. Run: forge.py --init\n")
         return
 
@@ -2565,9 +2587,59 @@ def full_cycle(root):
     print(f"{bar}\n")
 
 
+HELP_TEXT = """forge — pytest regression shield with predictive analytics
+
+USAGE
+  forge                            run tests vs baseline (default)
+  forge --baseline                 run tests AND save as new baseline
+  forge --init                     scaffold .forge/, BUGS.md, save first baseline
+  forge --fast [-v]                run only tests changed since last commit
+  forge --watch                    auto re-run on .py file change
+
+ANALYTICS
+  forge --predict [--weeks N]      rank files by churn-based defect risk
+  forge --carmack [--weeks N]      multi-signal defect score (Kalman + wavelet + coupling)
+  forge --anomaly [--weeks N]      flag commits with anomalous activity
+  forge --heatmap                  show per-file failure heatmap
+  forge --locate                   Ochiai SBFL fault localization (needs coverage.py)
+
+FLAKY / BISECT
+  forge --flaky [N]                re-run failing tests N times to classify flaky
+  forge --flaky-dtw [N]            DTW-based flaky pattern detection
+  forge --bisect TEST              git bisect a failing test back to its breaking commit
+
+TEST GENERATION / MUTATION
+  forge --gen-props PATH           Hypothesis property tests (skips destructive funcs by default)
+  forge --gen-props PATH --include-destructive    DANGEROUS: fuzz destructive funcs
+  forge --mutate [TARGET]          pure-Python mutation testing
+  forge --minimize TEST INPUT      ddmin (Zeller 2002) on a failing input
+
+SNAPSHOT
+  forge --snapshot "CMD"           capture a CLI command's output as golden
+  forge --snapshot-check           re-run captured commands, diff against golden
+
+BUGS
+  forge --add "DESCRIPTION"        log a new entry in BUGS.md
+  forge --close BUG-ID             mark bug closed in BUGS.md
+
+OPTIONS
+  -v, --verbose                    verbose pytest output
+  -h, --help                       show this help
+  --diff                           show diff vs baseline (with default run)
+  --full-cycle                     init + baseline + carmack + heatmap (everything)
+
+DOCS
+  https://github.com/sky1241/forge
+"""
+
+
 def main():
     root = find_repo_root()
     args = sys.argv[1:]
+
+    if "-h" in args or "--help" in args:
+        print(HELP_TEXT)
+        return
 
     if "--full-cycle" in args:
         full_cycle(root)
