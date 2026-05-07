@@ -541,6 +541,64 @@ class TestPytestParserRegression:
         assert forge._parse_pytest_failures(out) == []
 
 
+class TestFindTestsExcludesBenchmarks:
+    """Pin: find_tests() must exclude bench/ and benchmarks/ directories by
+    default. Mutation testing measures correctness, not performance — and
+    pytest-benchmark suites are typically slow enough to blow the per-mutant
+    timeout before any real test gets to run (real-world case found on
+    python-attrs/attrs by cousin pc1 on 2026-05-07: 11/11 timeouts on
+    exceptions.py because bench/test_benchmarks.py ran first and alone took
+    107 seconds)."""
+
+    def _make_test_layout(self, tmp_path):
+        """tests/test_real.py + bench/test_benchmarks.py + benchmarks/test_b.py"""
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_real.py").write_text("def test_a(): assert True\n")
+        (tmp_path / "bench").mkdir()
+        (tmp_path / "bench" / "test_benchmarks.py").write_text("def test_b(): assert True\n")
+        (tmp_path / "benchmarks").mkdir()
+        (tmp_path / "benchmarks" / "test_b.py").write_text("def test_c(): assert True\n")
+
+    def test_default_excludes_bench_dir(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FORGE_INCLUDE_BENCHMARKS", raising=False)
+        self._make_test_layout(tmp_path)
+        files = forge.find_tests(tmp_path)
+        names = [str(f) for f in files]
+        assert any("tests/test_real.py" in n for n in names), \
+            f"real test must be picked: {names}"
+        assert not any("bench/test_benchmarks.py" in n for n in names), \
+            f"bench/ must be excluded by default: {names}"
+        assert not any("benchmarks/test_b.py" in n for n in names), \
+            f"benchmarks/ must be excluded by default: {names}"
+
+    def test_env_var_includes_benchmarks(self, tmp_path, monkeypatch):
+        """FORGE_INCLUDE_BENCHMARKS=1 brings bench/ and benchmarks/ back in."""
+        self._make_test_layout(tmp_path)
+        monkeypatch.setenv("FORGE_INCLUDE_BENCHMARKS", "1")
+        files = forge.find_tests(tmp_path)
+        names = [str(f) for f in files]
+        assert any("bench/test_benchmarks.py" in n for n in names)
+        assert any("benchmarks/test_b.py" in n for n in names)
+
+    def test_does_not_exclude_path_containing_bench_substring(self, tmp_path, monkeypatch):
+        """Conservative match: only the directory names exactly bench / benchmarks
+        get excluded. A file or dir whose name CONTAINS 'bench' but isn't
+        literally 'bench/' or 'benchmarks/' must stay in."""
+        monkeypatch.delenv("FORGE_INCLUDE_BENCHMARKS", raising=False)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_benchmark_helpers.py").write_text("def test_x(): pass\n")
+        (tmp_path / "subench").mkdir()
+        (tmp_path / "subench" / "test_y.py").write_text("def test_y(): pass\n")
+        files = forge.find_tests(tmp_path)
+        names = [str(f) for f in files]
+        # 'benchmark' as part of a filename should NOT trigger the exclude
+        assert any("test_benchmark_helpers.py" in n for n in names), \
+            f"file with 'benchmark' in its name kept: {names}"
+        # 'subench' as a dir name must NOT match 'bench/' (no leading sep)
+        assert any("subench/test_y.py" in n for n in names), \
+            f"dir 'subench' kept (only literal 'bench/' excluded): {names}"
+
+
 class TestForgeTestFilterPlumbing:
     """Pin: FORGE_TEST_FILTER must reach every sub-command's pytest invocation.
     Without this, a noisy target repo (with pre-existing unrelated failures)

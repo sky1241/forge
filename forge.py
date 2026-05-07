@@ -461,12 +461,28 @@ def find_repo_root():
 
 
 def find_tests(root):
-    """Find all test files in the repo."""
+    """Find all test files in the repo.
+
+    Excludes benchmarks by default. Mutation testing measures correctness,
+    not performance — pytest-benchmark suites in bench/ or benchmarks/ are
+    typically slow (hundreds of rounds) and never assert behavioral
+    correctness, so they neither kill mutants honestly nor finish within a
+    reasonable timeout. attrs's bench/test_benchmarks.py was the canonical
+    case (107s single-thread, picked up alphabetically before tests/,
+    blew the per-mutant budget on every run).
+
+    Override with FORGE_INCLUDE_BENCHMARKS=1 if you really want them.
+    """
     tests = []
     for pattern in ["tests/test_*.py", "test_*.py", "tests/**/test_*.py", "**/test_*.py"]:
         tests.extend(root.glob(pattern))
-    # Exclude .forge, __pycache__, .git, node_modules
-    tests = [t for t in tests if not any(x in str(t) for x in [".forge", "__pycache__", ".git", "node_modules"])]
+    excludes = [".forge", "__pycache__", ".git", "node_modules"]
+    if not os.environ.get("FORGE_INCLUDE_BENCHMARKS"):
+        # Match /bench/ or /benchmarks/ anywhere in the path. Conservative —
+        # only directory names that match exactly, not any file containing
+        # "bench" in its name.
+        excludes += [f"{os.sep}bench{os.sep}", f"{os.sep}benchmarks{os.sep}"]
+    tests = [t for t in tests if not any(x in str(t) for x in excludes)]
     return sorted(set(tests))
 
 
