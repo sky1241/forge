@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-shield"
+version = "0.1.0"
+description = "Pytest regression shield with predictive analytics — Louvain communities, Kaplan-Meier survival, adaptive Kalman over git history"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "sky1241" }]
+keywords = [
+    "pytest",
+    "regression",
+    "testing",
+    "louvain",
+    "kaplan-meier",
+    "kalman",
+    "defect-prediction",
+    "flaky-tests",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "coverage>=7.0", "hypothesis>=6.0", "mutmut>=2.4"]
+
+[project.scripts]
+forge = "forge:main"
+
+[project.urls]
+Homepage = "https://github.com/sky1241/forge"
+Issues = "https://github.com/sky1241/forge/issues"
+Repository = "https://github.com/sky1241/forge"
+
+[tool.setuptools]
+py-modules = ["forge"]
