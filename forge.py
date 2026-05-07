@@ -541,14 +541,7 @@ def run_tests(root, verbose=False):
                     "duration": round(time.time() - start, 1),
                     "raw_output": output}
 
-    # Extract failure details
-    details = []
-    for match in re.finditer(r"(FAILED|ERROR)\s+(.*?)(?:\s+-\s+(.*))?$", output, re.MULTILINE):
-        details.append({
-            "test": match.group(2).strip(),
-            "status": match.group(1),
-            "msg": (match.group(3) or "").strip()
-        })
+    details = _parse_pytest_failures(output)
 
     return {
         "total": passed + failed + errors + skipped,
@@ -560,6 +553,36 @@ def run_tests(root, verbose=False):
         "duration": round(duration, 1),
         "raw_output": output if verbose else None
     }
+
+
+def _parse_pytest_failures(output):
+    """Extract unique (test, status, msg) entries from pytest output.
+
+    Matches only the "short test summary" format:
+        FAILED tests/path.py::test_name - message
+        ERROR  tests/path.py::test_name - message
+
+    Anchored with ^ (re.MULTILINE) to skip pytest's verbose progress lines
+    such as `tests/x.py::test_y FAILED [13%]` or the bare `[FAILED] [13%]`
+    bar — those would otherwise inflate failure counts. The test id must
+    look like a real pytest node id (contains '::' or ends with '.py').
+    """
+    details = []
+    seen = set()
+    for match in re.finditer(
+        r"^(FAILED|ERROR)\s+(\S+(?:::\S+)+|\S+\.py)(?:\s+-\s+(.*))?$",
+        output, re.MULTILINE
+    ):
+        test_id = match.group(2).strip()
+        if test_id in seen:
+            continue
+        seen.add(test_id)
+        details.append({
+            "test": test_id,
+            "status": match.group(1),
+            "msg": (match.group(3) or "").strip(),
+        })
+    return details
 
 
 def load_json(path):
@@ -878,6 +901,36 @@ def bisect_test(root, test_name):
         print(f"  {test_name} is not currently failing. Nothing to bisect.")
         return
 
+    # Capture the original ref so we can restore exactly (handles both branches
+    # and detached HEAD). 'git checkout -' fails silently if HEAD was already
+    # detached, leaving the repo in a wrong state.
+    orig_head = subprocess.run(["git", "symbolic-ref", "-q", "--short", "HEAD"],
+                               capture_output=True, text=True, cwd=str(root)).stdout.strip()
+    if not orig_head:
+        orig_head = subprocess.run(["git", "rev-parse", "HEAD"],
+                                   capture_output=True, text=True, cwd=str(root)).stdout.strip()
+
+    # Drop-in pitfall: forge.py is often present at the repo root. If the user
+    # committed it, ancestor commits don't have it and `git checkout` deletes
+    # it from the worktree → pytest crashes for unrelated reasons → bisect
+    # marks every iteration FAIL and returns the wrong commit. Snapshot the
+    # files that must survive every checkout, restore them after each one.
+    survivors = {}
+    for rel in ["forge.py", ".forge"]:
+        p = root / rel
+        if p.is_file():
+            survivors[rel] = p.read_bytes()
+    # Stash any uncommitted changes so checkouts succeed cleanly
+    stash_r = subprocess.run(["git", "stash", "--include-untracked", "--quiet"],
+                             cwd=str(root), capture_output=True, text=True)
+    did_stash = stash_r.returncode == 0 and "No local changes" not in (stash_r.stdout + stash_r.stderr)
+
+    def _restore_survivors():
+        for rel, data in survivors.items():
+            p = root / rel
+            if not p.exists():
+                p.write_bytes(data)
+
     # Find last known good (baseline commit or 20 commits back)
     try:
         log = subprocess.run(["git", "log", "--oneline", "-20"],
@@ -896,33 +949,51 @@ def bisect_test(root, test_name):
     good_idx = len(commits) - 1
     bad_idx = 0
 
-    while good_idx - bad_idx > 1:
-        mid = (good_idx + bad_idx) // 2
-        commit = commits[mid]
-        print(f"    Testing commit {commit}...", end=" ", flush=True)
+    try:
+        while good_idx - bad_idx > 1:
+            mid = (good_idx + bad_idx) // 2
+            commit = commits[mid]
+            print(f"    Testing commit {commit}...", end=" ", flush=True)
 
-        # Stash, checkout, test, come back
-        subprocess.run(["git", "stash", "--quiet"], cwd=str(root),
+            subprocess.run(["git", "checkout", commit, "--quiet"], cwd=str(root),
+                           capture_output=True)
+            _restore_survivors()  # forge.py / .forge may have just been removed
+
+            r = subprocess.run(cmd_test, capture_output=True, text=True,
+                              cwd=str(root), encoding="utf-8", errors="replace",
+                              timeout=120)
+            is_bad = "failed" in r.stdout.lower() or "error" in r.stdout.lower()
+            print("FAIL" if is_bad else "PASS")
+
+            if is_bad:
+                bad_idx = mid
+            else:
+                good_idx = mid
+    finally:
+        # ALWAYS return to the original ref + restore survivors + pop stash,
+        # even if the loop above raised (timeout, KeyboardInterrupt, etc.)
+        # First, drop any survivor files we restored as untracked — otherwise
+        # `git checkout` refuses to clobber them with the original ref's
+        # tracked version. The original ref's version (if any) will be brought
+        # back by the checkout itself; if not, _restore_survivors() handles it.
+        for rel in list(survivors):
+            p = root / rel
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", rel],
+                cwd=str(root), capture_output=True
+            ).returncode == 0
+            if p.exists() and not tracked:
+                if p.is_file():
+                    p.unlink()
+                else:
+                    import shutil as _sh
+                    _sh.rmtree(p, ignore_errors=True)
+        subprocess.run(["git", "checkout", orig_head, "--quiet"], cwd=str(root),
                        capture_output=True)
-        subprocess.run(["git", "checkout", commit, "--quiet"], cwd=str(root),
-                       capture_output=True)
-
-        r = subprocess.run(cmd_test, capture_output=True, text=True,
-                          cwd=str(root), encoding="utf-8", errors="replace",
-                          timeout=120)
-        is_bad = "failed" in r.stdout.lower() or "error" in r.stdout.lower()
-        print("FAIL" if is_bad else "PASS")
-
-        if is_bad:
-            bad_idx = mid
-        else:
-            good_idx = mid
-
-    # Return to original
-    subprocess.run(["git", "checkout", "-", "--quiet"], cwd=str(root),
-                   capture_output=True)
-    subprocess.run(["git", "stash", "pop", "--quiet"], cwd=str(root),
-                   capture_output=True)
+        _restore_survivors()
+        if did_stash:
+            subprocess.run(["git", "stash", "pop", "--quiet"], cwd=str(root),
+                           capture_output=True)
 
     bad_commit = commits[bad_idx]
     # Get commit details

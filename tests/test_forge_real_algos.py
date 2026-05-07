@@ -496,3 +496,98 @@ class TestPolishUX:
         out = capsys.readouterr().out
         assert "Coupling=n/a" in out
         assert "Coupling=0.00" not in out
+
+
+class TestPytestParserRegression:
+    """Pin _parse_pytest_failures: must skip verbose progress lines and
+    the literal `[FAILED] [13%]` bar, only keep entries from the pytest
+    'short test summary info' block. Earlier versions matched any line
+    containing FAILED/ERROR, double-counting failures."""
+
+    def test_progress_bars_ignored(self):
+        out = (
+            "tests/test_x.py::test_y FAILED                            [ 13%]\n"
+            "[FAILED] [ 99%]\n"
+            "=========================== short test summary info ============================\n"
+            "FAILED tests/test_x.py::test_y - AssertionError: assert 1 == 2\n"
+            "==================== 1 failed, 100 passed in 0.10s ====================\n"
+        )
+        details = forge._parse_pytest_failures(out)
+        # ONE real failure, not three.
+        assert len(details) == 1
+        assert details[0]["test"] == "tests/test_x.py::test_y"
+        assert details[0]["status"] == "FAILED"
+        assert "AssertionError" in details[0]["msg"]
+
+    def test_collection_error_kept(self):
+        out = "ERROR tests/conftest.py - ImportError: missing module\n"
+        details = forge._parse_pytest_failures(out)
+        assert len(details) == 1
+        assert details[0]["test"] == "tests/conftest.py"
+        assert details[0]["status"] == "ERROR"
+
+    def test_dedupe_when_pytest_lists_twice(self):
+        """pytest sometimes echoes a failure in summary AND in error section."""
+        out = (
+            "FAILED tests/a.py::test_b - boom\n"
+            "FAILED tests/a.py::test_b - boom\n"
+        )
+        assert len(forge._parse_pytest_failures(out)) == 1
+
+    def test_no_match_on_unrelated_text(self):
+        out = "FAILED to load plugin\n[FAILED] [ 99%]\nERROR while parsing\n"
+        # None of these are pytest node ids → no entries.
+        assert forge._parse_pytest_failures(out) == []
+
+
+class TestBisectSurvivors:
+    """Pin bisect_test: forge.py and .forge/ must survive across `git checkout
+    <ancestor>` calls even when the user has committed them inside the target
+    repo. Earlier versions silently lost them and reported wrong commits."""
+
+    def test_bisect_restores_forge_after_checkout(self, capsys, tmp_path, monkeypatch):
+        """End-to-end: 4 commits, bug introduced in the last one, forge.py
+        only present in the bug commit. bisect must still find the bug commit
+        and not crash on every iteration."""
+        import shutil
+        import subprocess as _sp
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_init(repo)
+        # Commits 1-3 (good): mod.py defines add() correctly + a passing test
+        (repo / "mod.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_mod.py").write_text(
+            "from mod import add\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+            encoding="utf-8",
+        )
+        _git_commit(repo, "good 1")
+        (repo / "README.md").write_text("hi\n", encoding="utf-8")
+        _git_commit(repo, "good 2")
+        (repo / "README.md").write_text("hi v2\n", encoding="utf-8")
+        _git_commit(repo, "good 3")
+
+        # Commit 4 (BAD): break add() AND drop forge.py at the root, then
+        # commit them together — the failure mode that broke real users.
+        (repo / "mod.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+        forge_path_in_repo = repo / "forge.py"
+        forge_path_in_repo.write_bytes(Path(forge.__file__).read_bytes())
+        _git_commit(repo, "bad: add now subtracts (drops forge.py too)")
+
+        # Run bisect on the failing test
+        monkeypatch.chdir(repo)
+        forge.bisect_test(repo, "test_add")
+        out = capsys.readouterr().out
+
+        # The bisect must have found the BAD commit (last one), not an ancestor
+        assert "BISECT RESULT" in out
+        assert "bad: add now subtracts" in out, (
+            f"bisect should land on the bad commit; got:\n{out}"
+        )
+        # Worktree must be back on the original branch (not detached HEAD)
+        head = _sp.run(["git", "symbolic-ref", "-q", "--short", "HEAD"],
+                       cwd=str(repo), capture_output=True, text=True).stdout.strip()
+        assert head, f"HEAD is detached after bisect, expected a branch. out:\n{out}"
+        # forge.py must still be present
+        assert forge_path_in_repo.exists()
