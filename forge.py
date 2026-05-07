@@ -842,6 +842,8 @@ def show_heatmap(root):
     print(f"{bar}")
     if not failure_counts:
         print("  No failures recorded yet.")
+        print("  Tip: forge logs every test run to .forge/forge_log.txt. Run a few cycles")
+        print("  (or run with a known-broken test) to populate the heat map.")
     else:
         total_failures = sum(failure_counts.values())
         cumulative = 0
@@ -982,7 +984,8 @@ def run_fast(root, verbose=False):
     """Run only tests impacted by recent changes."""
     changed = get_changed_files(root)
     if not changed:
-        print("  No changes detected. Nothing to test.")
+        print("  No changes detected since last commit. Nothing to test.")
+        print("  Tip: forge --fast looks at git diff HEAD. Edit a tracked file or stage a change first.")
         return
 
     print(f"  Changed files: {len(changed)}")
@@ -2232,7 +2235,8 @@ def predict_carmack(root, weeks=8):
             "kalman": kalman_risk, "wavelet_hf": hf_energy,
             "crash_prob": crash_prob, "coupling": file_coupling,
             "churn": churn_rel, "freq": freq,
-            "authors": len(s["authors"]), "bugfixes": s["bugfixes"], "loc": s["loc"]
+            "authors": len(s["authors"]), "bugfixes": s["bugfixes"], "loc": s["loc"],
+            "n_distinct_days": len(s["daily_churn"]),
         })
 
     if not results:
@@ -2269,15 +2273,26 @@ def predict_carmack(root, weeks=8):
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
+    n_active = len(results)
+    total_commits = sum(r["freq"] for r in results)
+    distinct_days_total = len({d for s in file_stats.values() for d in s["daily_churn"]})
+    small_repo = n_active < 6 or total_commits < 10 or distinct_days_total < 7
+    n_graph_nodes = len(graph)
+
     bar = "=" * 60
     print(f"\n{bar}")
     print(f"  CARMACK PREDICT — Cross-domain defect prediction")
     print(f"  Kalman + Wavelet + Kaplan-Meier + Import Modularity")
     print(f"{bar}")
+    if small_repo:
+        print(f"  WARNING: small repo or short history — Carmack signals may be noisy.")
+        print(f"           For a meaningful demo, run on a repo with >=6 files and >=4 weeks of history.")
     for r in results[:15]:
+        wavelet_str = "n/a " if r.get("n_distinct_days", 0) < 3 else f"{r['wavelet_hf']:.1f}"
+        coupling_str = "n/a " if n_graph_nodes < 3 else f"{r['coupling']:.2f}"
         print(f"  {r['score']:.3f}  {r['file']}")
-        print(f"       Kalman={r['kalman']:.2f}  Wavelet={r['wavelet_hf']:.1f}  "
-              f"Crash={r['crash_prob']:.0%}  Coupling={r['coupling']:.2f}")
+        print(f"       Kalman={r['kalman']:.2f}  Wavelet={wavelet_str}  "
+              f"Crash={r['crash_prob']:.0%}  Coupling={coupling_str}")
         print(f"       churn={r['churn']:.1f} freq={r['freq']} authors={r['authors']} "
               f"bugfix={r['bugfixes']} loc={r['loc']}")
     print(f"{bar}\n")

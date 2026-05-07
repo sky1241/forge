@@ -421,3 +421,78 @@ class TestDestructiveDetector:
         is_destr, reason = forge._is_destructive_function(node, src)
         assert is_destr
         assert "run_" in reason
+
+
+def _git_init(path):
+    """Create a minimal git repo at `path` with deterministic config."""
+    import subprocess as _sp
+    _sp.run(["git", "init", "-q"], cwd=str(path), check=True)
+    _sp.run(["git", "config", "user.email", "test@example.com"], cwd=str(path), check=True)
+    _sp.run(["git", "config", "user.name", "test"], cwd=str(path), check=True)
+    _sp.run(["git", "config", "commit.gpgsign", "false"], cwd=str(path), check=True)
+
+
+def _git_commit(path, msg="init"):
+    """Stage everything and commit at `path`."""
+    import subprocess as _sp
+    _sp.run(["git", "add", "-A"], cwd=str(path), check=True)
+    _sp.run(["git", "commit", "-q", "-m", msg], cwd=str(path), check=True)
+
+
+class TestPolishUX:
+    """UX polish: empty-state tips and degenerate-signal markers should
+    surface honest information instead of misleading zeros."""
+
+    def test_fast_tip_appears_when_no_changes(self, capsys, tmp_path):
+        """run_fast must point users at git diff HEAD when nothing has changed."""
+        _git_init(tmp_path)
+        (tmp_path / "f.py").write_text("x = 1\n", encoding="utf-8")
+        _git_commit(tmp_path)
+        forge.run_fast(tmp_path)
+        out = capsys.readouterr().out
+        assert "No changes detected" in out
+        assert "git diff HEAD" in out
+        assert "Tip" in out
+
+    def test_heatmap_tip_appears_when_no_failures(self, capsys, tmp_path):
+        """show_heatmap must explain how to populate the log when empty."""
+        forge_dir = tmp_path / forge.FORGE_DIR
+        forge_dir.mkdir()
+        (forge_dir / "forge_log.txt").write_text("", encoding="utf-8")
+        forge.show_heatmap(tmp_path)
+        out = capsys.readouterr().out
+        assert "No failures recorded" in out
+        assert "forge_log.txt" in out
+        assert "Tip" in out
+
+    def test_carmack_warning_on_small_repo(self, capsys, tmp_path):
+        """predict_carmack must warn when files <6 OR commits <10 OR distinct days <7."""
+        _git_init(tmp_path)
+        (tmp_path / "tiny.py").write_text("x = 1\n", encoding="utf-8")
+        _git_commit(tmp_path, "init")
+        forge.predict_carmack(tmp_path, weeks=1)
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "small repo" in out
+
+    def test_carmack_wavelet_na_on_short_signal(self, capsys, tmp_path):
+        """Wavelet must show 'n/a' (not '0.0') when daily-churn has <3 distinct days."""
+        _git_init(tmp_path)
+        for i in range(2):
+            (tmp_path / f"f{i}.py").write_text(f"x = {i}\n", encoding="utf-8")
+        _git_commit(tmp_path, "init")
+        forge.predict_carmack(tmp_path, weeks=1)
+        out = capsys.readouterr().out
+        # Single commit -> 1 distinct day -> < 3 -> 'n/a' marker, never the misleading 0.0
+        assert "Wavelet=n/a" in out
+        assert "Wavelet=0.0" not in out
+
+    def test_carmack_coupling_na_on_tiny_graph(self, capsys, tmp_path):
+        """Coupling must show 'n/a' when the import graph has <3 nodes."""
+        _git_init(tmp_path)
+        (tmp_path / "only.py").write_text("x = 1\n", encoding="utf-8")
+        _git_commit(tmp_path, "init")
+        forge.predict_carmack(tmp_path, weeks=1)
+        out = capsys.readouterr().out
+        assert "Coupling=n/a" in out
+        assert "Coupling=0.00" not in out
