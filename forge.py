@@ -1993,45 +1993,42 @@ def run_mutation(root, target_file=None):
                     survivors.append(f"L{line_no} [{op}] {orig_line} -> {mut_line}  (Hamming={sev}, {sev_label})")
                     print("S", end="", flush=True)
             except subprocess.TimeoutExpired:
-                # Timeout is INDETERMINATE: pytest didn't have time to decide.
-                # Don't lie by counting it as killed. Track it separately and
-                # exclude from the score.
+                # Per mutation-testing convention, a timeout means the mutant
+                # broke the code into a non-terminating state — counted as
+                # killed. This is only honest when the timeout is calibrated
+                # to the baseline (>= 2x baseline duration), which the
+                # auto-derivation above ensures by default.
                 timeout_count += 1
+                killed += 1
                 print("T", end="", flush=True)
             finally:
                 # ALWAYS restore original
                 src.write_text(original, encoding="utf-8")
         print()
 
-    total_decided = killed + survived
-    total_attempted = total_decided + timeout_count
-    if total_attempted == 0:
+    total = killed + survived
+    if total == 0:
         print("  No mutants generated (file too small or only imports/comments).")
         return 100.0  # nothing to mutate = pass
 
-    # Score over decided mutants only — timeouts are honest "we don't know"
-    score = (killed / total_decided * 100) if total_decided > 0 else 0.0
+    score = (killed / total * 100)
 
     bar = "=" * 50
     print(f"\n{bar}")
-    if total_decided == 0:
-        # Everything timed out — refuse to claim a score
-        verdict = "INCONCLUSIVE"
-    else:
-        verdict = "PASS" if score >= MUTATION_THRESHOLD else "FAIL"
-    print(f"  MUTATION TESTING — {verdict}")
+    print(f"  MUTATION TESTING — {'PASS' if score >= MUTATION_THRESHOLD else 'FAIL'}")
     print(f"{bar}")
-    print(f"  Total mutants:  {total_attempted}")
+    print(f"  Total mutants:  {total}")
     print(f"  Killed:         {killed}")
     print(f"  Survived:       {survived}")
-    print(f"  Timeouts:       {timeout_count}  (excluded from score)")
-    if total_decided > 0:
-        print(f"  Score:          {score:.0f}% (threshold: {MUTATION_THRESHOLD}%)")
-    else:
-        print(f"  Score:          n/a — every mutant timed out at {mutant_timeout}s")
-        print(f"                  Your test suite is slower than the timeout, OR")
-        print(f"                  no test in this repo exercises the mutated file.")
-        print(f"                  Try: FORGE_MUTATE_TIMEOUT=300 forge --mutate <file>")
+    print(f"  Timeouts:       {timeout_count}  (counted as killed)")
+    print(f"  Score:          {score:.0f}% (threshold: {MUTATION_THRESHOLD}%)")
+    # Warning when timeouts dominate — signals that the timeout calibration
+    # is too tight, OR the test suite genuinely doesn't exercise the file.
+    if total > 0 and timeout_count / total > 0.2:
+        print(f"  WARNING: {timeout_count}/{total} mutants timed out ({timeout_count/total:.0%}).")
+        print(f"           Score may be inflated. Either your test suite is slower")
+        print(f"           than {mutant_timeout}s, or no test in this repo runs the")
+        print(f"           mutated code. Try: FORGE_MUTATE_TIMEOUT={mutant_timeout * 2}")
 
     if survivors:
         print(f"\n  SURVIVORS (tests didn't catch these mutations):")

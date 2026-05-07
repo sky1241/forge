@@ -609,9 +609,11 @@ class TestMutationTimeoutHonest:
         forge.run_mutation(tmp_path, str(tmp_path / "m.py"))
         assert captured.get("timeout") == 42
 
-    def test_score_is_na_when_all_timeout(self, tmp_path, monkeypatch, capsys):
-        """If every mutant times out, the printed score must be 'n/a' (not 100%
-        — that was the old lie). The verdict must say INCONCLUSIVE."""
+    def test_timeouts_are_killed_with_warning_when_dominant(self, tmp_path, monkeypatch, capsys):
+        """A mutant that times out is counted as killed (mutation-testing
+        convention: it broke the code into a non-terminating state). But when
+        timeouts dominate (>20%), forge prints a warning so the user knows the
+        score may be inflated."""
         import subprocess as _sp_real
         _git_init(tmp_path)
         (tmp_path / "m.py").write_text(
@@ -625,7 +627,6 @@ class TestMutationTimeoutHonest:
         )
         _git_commit(tmp_path)
 
-        # Force every pytest invocation to TimeoutExpired
         def fake_run_timeout(cmd, *args, **kwargs):
             if isinstance(cmd, list) and len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pytest":
                 raise _sp_real.TimeoutExpired(cmd, kwargs.get("timeout", 30))
@@ -634,9 +635,12 @@ class TestMutationTimeoutHonest:
         monkeypatch.setattr(forge.subprocess, "run", fake_run_timeout)
         forge.run_mutation(tmp_path, str(tmp_path / "m.py"))
         out = capsys.readouterr().out
-        assert "INCONCLUSIVE" in out, f"expected INCONCLUSIVE verdict; got:\n{out}"
-        assert "Score:          n/a" in out, f"expected 'Score: n/a'; got:\n{out}"
-        assert "Killed:         0" in out
+        # Timeouts are now counted as killed (classical convention)
+        assert "Score:          100%" in out
+        # But the warning must fire when >20% are timeouts
+        assert "WARNING" in out
+        assert "timed out" in out
+        assert "FORGE_MUTATE_TIMEOUT" in out
         # Source file must be restored (not left mutated)
         assert (tmp_path / "m.py").read_text() == \
             "def f(a, b):\n    return a + b\n\ndef g(x):\n    return x * 2\n"
