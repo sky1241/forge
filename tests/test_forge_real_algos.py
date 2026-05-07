@@ -15,6 +15,7 @@ regressions show up loudly.
 """
 import importlib.util
 import math
+import subprocess
 import sys
 from pathlib import Path
 
@@ -538,6 +539,107 @@ class TestPytestParserRegression:
         out = "FAILED to load plugin\n[FAILED] [ 99%]\nERROR while parsing\n"
         # None of these are pytest node ids → no entries.
         assert forge._parse_pytest_failures(out) == []
+
+
+class TestMutationTimeoutHonest:
+    """Pin run_mutation: timeouts must NOT be counted as killed (was a lie),
+    score must be 'n/a' when every mutant timed out, and the per-mutant timeout
+    must derive from the baseline (2x its duration) instead of being a hard 30s
+    that breaks any repo with a slower test suite."""
+
+    def test_timeout_derives_from_baseline_when_set(self, tmp_path, monkeypatch):
+        """If a baseline exists with duration=120s, mutant timeout should be
+        2*120 + 10 = 250s (not the previous hard-coded 30s)."""
+        _git_init(tmp_path)
+        # Create a target with at least one mutable line
+        (tmp_path / "m.py").write_text("def f(a, b):\n    return a + b\n", encoding="utf-8")
+        (tmp_path / "tests").mkdir()
+        # Empty test file — pytest will collect 0 tests, so run_mutation should
+        # bail with "No tests found" before even starting. We don't actually
+        # need a test run here; we just need to verify the timeout calc.
+        (tmp_path / "tests" / "test_m.py").write_text("", encoding="utf-8")
+        _git_commit(tmp_path)
+
+        # Seed a baseline.json with a known duration
+        forge_dir = tmp_path / forge.FORGE_DIR
+        forge_dir.mkdir()
+        forge.save_json(str(forge_dir / "baseline.json"),
+                        {"duration": 120.0, "passed": 5, "failed": 0,
+                         "errors": 0, "skipped": 0, "total": 5, "details": []})
+
+        captured = {}
+        real_run = subprocess.run
+
+        def spy_run(cmd, *args, **kwargs):
+            # Capture the timeout passed to subprocess.run on pytest invocations
+            if isinstance(cmd, list) and len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pytest":
+                captured["timeout"] = kwargs.get("timeout")
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(forge.subprocess, "run", spy_run)
+        forge.run_mutation(tmp_path, str(tmp_path / "m.py"))
+        assert captured.get("timeout") == 2 * 120 + 10, (
+            f"expected timeout 250 (2*120+10), got {captured.get('timeout')}"
+        )
+
+    def test_env_var_override_wins(self, tmp_path, monkeypatch):
+        """FORGE_MUTATE_TIMEOUT=42 should override any baseline-derived value."""
+        _git_init(tmp_path)
+        (tmp_path / "m.py").write_text("def f(a, b):\n    return a + b\n", encoding="utf-8")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_m.py").write_text("", encoding="utf-8")
+        _git_commit(tmp_path)
+
+        forge_dir = tmp_path / forge.FORGE_DIR
+        forge_dir.mkdir()
+        forge.save_json(str(forge_dir / "baseline.json"),
+                        {"duration": 9999.0, "passed": 0, "failed": 0,
+                         "errors": 0, "skipped": 0, "total": 0, "details": []})
+
+        captured = {}
+        real_run = subprocess.run
+
+        def spy_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pytest":
+                captured["timeout"] = kwargs.get("timeout")
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setenv("FORGE_MUTATE_TIMEOUT", "42")
+        monkeypatch.setattr(forge.subprocess, "run", spy_run)
+        forge.run_mutation(tmp_path, str(tmp_path / "m.py"))
+        assert captured.get("timeout") == 42
+
+    def test_score_is_na_when_all_timeout(self, tmp_path, monkeypatch, capsys):
+        """If every mutant times out, the printed score must be 'n/a' (not 100%
+        — that was the old lie). The verdict must say INCONCLUSIVE."""
+        import subprocess as _sp_real
+        _git_init(tmp_path)
+        (tmp_path / "m.py").write_text(
+            "def f(a, b):\n    return a + b\n\ndef g(x):\n    return x * 2\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_m.py").write_text(
+            "from m import f\ndef test_f():\n    assert f(1, 2) == 3\n",
+            encoding="utf-8",
+        )
+        _git_commit(tmp_path)
+
+        # Force every pytest invocation to TimeoutExpired
+        def fake_run_timeout(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pytest":
+                raise _sp_real.TimeoutExpired(cmd, kwargs.get("timeout", 30))
+            return _sp_real.run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(forge.subprocess, "run", fake_run_timeout)
+        forge.run_mutation(tmp_path, str(tmp_path / "m.py"))
+        out = capsys.readouterr().out
+        assert "INCONCLUSIVE" in out, f"expected INCONCLUSIVE verdict; got:\n{out}"
+        assert "Score:          n/a" in out, f"expected 'Score: n/a'; got:\n{out}"
+        assert "Killed:         0" in out
+        # Source file must be restored (not left mutated)
+        assert (tmp_path / "m.py").read_text() == \
+            "def f(a, b):\n    return a + b\n\ndef g(x):\n    return x * 2\n"
 
 
 class TestBisectSurvivors:
