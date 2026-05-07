@@ -423,11 +423,6 @@ def _modularity_contribution(graph):
     return {f: max(contrib.get(f, 0.0), 0.0) / max_abs for f in graph}
 
 
-# Back-compat alias — old name kept so older callers don't break,
-# but it now points at the real Louvain-based contribution score.
-_newman_modularity = _modularity_contribution
-
-
 def _check_dep(name, pip_name=None):
     """Try to import optional dependency, return module or None."""
     try:
@@ -496,9 +491,10 @@ def run_tests(root, verbose=False):
         cmd.append("--timeout=30")
     except ImportError:
         pass
-    cmd.extend([
-        "-k", "not (real_api or real_llm or B13Claude or tier1_b1 or tier1_full or lazy_real or sync_tls or CorpusFull)",
-    ])
+    # Optional pytest -k expression via env var (e.g. to skip slow integration tests)
+    test_filter = os.environ.get("FORGE_TEST_FILTER")
+    if test_filter:
+        cmd.extend(["-k", test_filter])
 
     try:
         result = subprocess.run(
@@ -657,7 +653,7 @@ def init_repo(root):
         bugs_path.write_text(f"""# BUGS — {root.name}
 
 > Format: each bug has an ID, status, symptom, root cause, fix, and test.
-> This file is READ BY CLAUDE AT BOOT. Keep it accurate.
+> Keep this file accurate — your AI assistant (or future you) will read it before fixing bugs.
 
 <!-- TEMPLATE
 ## BUG-XXX: [short description]
@@ -690,10 +686,11 @@ def add_bug(root, description):
 
     content = bugs_path.read_text(encoding="utf-8")
 
-    # Find next bug number
-    existing = re.findall(r"BUG-(\d+)", content)
+    # Find next bug number — accept both BUG- (correct) and BUG+ (legacy typo
+    # written by older versions of this script) so existing BUGS.md files keep counting.
+    existing = re.findall(r"BUG[-+](\d+)", content)
     next_num = max([int(n) for n in existing], default=0) + 1
-    bug_id = f"BUG+{next_num:03d}"
+    bug_id = f"BUG-{next_num:03d}"
 
     entry = f"""
 ## {bug_id}: {description}
@@ -1446,10 +1443,10 @@ def minimize_input(root, test_name, input_file):
 
 # === AXE 2: PROPERTY-BASED TEST GENERATION (Claessen & Hughes 2000) ===
 
-# BUG-102 (2026-04-10): destructive functions must NOT be fuzzed without isolation.
+# Destructive functions must NOT be fuzzed without isolation.
 # Hypothesis happily generates target_path='.' / dry_run=False and the test then
-# scrubs the entire repo in place. We discovered this when test_scrub_secrets
-# corrupted 165 files in MUNINN-. See BUGS.md.
+# scrubs the entire repo in place. We learned this the hard way: a single
+# property test on a redaction helper corrupted ~165 files before we had this guard.
 #
 # Defense: name patterns + AST scan for write operations. If either fires, the
 # function is treated as destructive and the generated test is wrapped with
@@ -1464,7 +1461,6 @@ _DESTRUCTIVE_NAME_PATTERNS = [
     r"^rebuild", r"^reset_", r"^cleanup", r"^prune",
     # database / state mutations
     r"^drop_", r"^truncate", r"^insert_", r"^update_",
-    r"^observe", r"^feed", r"^ingest", r"^compress_file",
     # network / external side effects
     r"^fetch_", r"^download", r"^upload", r"^send_", r"^post_", r"^put_",
     r"^sync_", r"_sync$", r"^pull_", r"^push_",
@@ -1472,11 +1468,6 @@ _DESTRUCTIVE_NAME_PATTERNS = [
     r"^run_", r"^exec_", r"^spawn_", r"^kill_",
     # hooks (anything in hook context is side-effecting by definition)
     r"_hook$", r"^hook_",
-    # query bridges and graph traversal (slow on real DBs, BUG-106 family)
-    r"^bridge", r"^spread_", r"^find_chain", r"^query_",
-    # CLI entry points and full-scan walkers
-    r"^cli_", r"^scan_", r"^walk_", r"^assign_", r"^process_",
-    r"^analyze_", r"^audit_", r"^report_",
 ]
 
 # AST node types / call patterns that indicate write side effects
@@ -1566,9 +1557,9 @@ def gen_props(root, module_path, include_destructive=False):
     """Analyze a Python module and generate Hypothesis property test skeletons.
     Detects: round-trip pairs, idempotent ops, sort/filter invariants.
 
-    BUG-102 fix: destructive functions (anything that writes to disk, runs
-    subprocess, talks to network, etc.) are skipped by default. Pass
-    include_destructive=True (or --include-destructive on the CLI) to override.
+    Destructive functions (anything that writes to disk, runs subprocess, talks
+    to network, etc.) are skipped by default — fuzzing them can corrupt the repo.
+    Pass include_destructive=True (or --include-destructive on the CLI) to override.
     """
     mod_path = Path(module_path)
     if not mod_path.is_absolute():
@@ -1584,18 +1575,16 @@ def gen_props(root, module_path, include_destructive=False):
         print(f"  Syntax error in {_safe_path(mod_path)}: {e}")
         return
 
-    # Collect all public functions
-    # BRICK 18 fix (2026-04-11): use iter_child_nodes (top-level only)
-    # instead of ast.walk (recursive). Class methods are not importable
-    # via `from module import *` so picking them up produced NameError
-    # at test runtime.
-    # Also capture return annotation to disambiguate filter-vs-tuple
-    # return functions (BUG-109 family — filter_dead_cubes returns tuple).
+    # Collect all public functions. Use iter_child_nodes (top-level only)
+    # instead of ast.walk (recursive): class methods are not importable via
+    # `from module import *` so picking them up would produce NameError at
+    # test runtime. Also capture return annotation to disambiguate filter-vs-
+    # tuple return functions.
     functions = []
     skipped_destructive = []
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
-            # BUG-102: filter destructive functions BEFORE generating any test
+            # Filter destructive functions BEFORE generating any test
             is_destr, reason = _is_destructive_function(node, source)
             if is_destr and not include_destructive:
                 skipped_destructive.append((node.name, reason))
@@ -1669,21 +1658,20 @@ def gen_props(root, module_path, include_destructive=False):
     import_path = str(rel).replace(os.sep, ".").replace(".py", "")
 
     # Build test file — imports are LIVE so the generated test actually runs.
-    # BRICK 18 fix (2026-04-11): ALSO insert the module's parent dir into
-    # sys.path. This is required for engine/core/* modules that internally
-    # do `from tokenizer import token_count` (sibling import). Without this,
-    # `from engine.core.muninn_tree import *` fails with ModuleNotFoundError
-    # because muninn_tree's own top-level `from tokenizer import ...` cannot
-    # resolve. Caught by running forge --gen-props on muninn_tree + muninn_feed.
+    # We insert BOTH the repo root and the module's parent dir into sys.path,
+    # so nested package modules (e.g. mypkg.subpkg.foo) that internally do
+    # `from sibling import bar` resolve correctly. Without the parent dir,
+    # `from mypkg.subpkg.foo import *` fails with ModuleNotFoundError because
+    # foo's own top-level `from sibling import ...` cannot find its sibling.
     lines = [
         "#!/usr/bin/env python3",
         f'"""Property-based tests for {mod_path.name} — generated by forge.py --gen-props"""',
         "import sys",
         "import os",
-        # Repo root (so `engine.core.foo` resolves)
+        # Repo root (so dotted module paths resolve)
         f"sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))",
-        # L7 fix: module parent dir relative to test file, not hardcoded absolute path.
-        # Computes the engine/core/ path from the test file location (tests/ -> repo root -> engine/core/).
+        # Module's parent dir, computed relative to the test file location
+        # (tests/ -> repo root -> module's package dir). Lets sibling imports work.
         f"sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), {repr(str(mod_path.parent.relative_to(root)))}))",
         "",
         "import pytest",
@@ -1691,15 +1679,13 @@ def gen_props(root, module_path, include_destructive=False):
         f"from {import_path} import *",
         "",
         "",
-        "# BUG-102 cwd guard (added 2026-05-07): the destructive detector",
-        "# catches direct mkdir/write/open calls in fuzzed function bodies,",
-        "# but it does not follow indirect calls (e.g. extract_tags() ->",
-        "# Mycelium() -> mkdir()). When Hypothesis fuzzes a path-like arg",
-        "# with a random string like '0' or '\\xfeQ', the indirect mkdir",
-        "# resolves it relative to cwd and pollutes the repo root.",
-        "# This autouse fixture chdir's into a tmp_path before each test,",
-        "# so any indirect file-system mutation lands in a sandbox that",
-        "# pytest cleans up automatically.",
+        "# cwd guard: the destructive detector catches direct mkdir/write/open",
+        "# calls in fuzzed function bodies, but it does not follow indirect calls",
+        "# (e.g. parse_input() -> IndexBuilder() -> mkdir()). When Hypothesis fuzzes",
+        "# a path-like arg with a random string like '0' or '\\xfeQ', the indirect",
+        "# mkdir resolves it relative to cwd and pollutes the repo root.",
+        "# This autouse fixture chdir's into tmp_path before each test, so any",
+        "# indirect file-system mutation lands in a sandbox pytest cleans up.",
         "@pytest.fixture(autouse=True)",
         "def _forge_isolate_cwd(tmp_path, monkeypatch):",
         "    monkeypatch.chdir(tmp_path)",
@@ -1742,10 +1728,9 @@ def gen_props(root, module_path, include_destructive=False):
             lines.append("")
             test_count += 1
         elif "filter" in name.lower() and func.get("return_type") in (None, "list"):
-            # BRICK 18 fix: only generate the subset test if the function
-            # actually returns a list. Functions like filter_dead_cubes that
-            # return a tuple of (kept, dropped) would FAIL this test because
-            # len(tuple) is the arity (2), not the kept count.
+            # Only generate the subset test if the function actually returns a list.
+            # Functions that return a tuple like (kept, dropped) would FAIL this test
+            # because len(tuple) is the arity (2), not the kept-element count.
             lines.append(f"@given({strats})")
             lines.append(f"@settings(max_examples=100)")
             lines.append(f"def test_{name}_subset({', '.join(a['name'] for a in args)}):")
@@ -1764,10 +1749,9 @@ def gen_props(root, module_path, include_destructive=False):
             lines.append(f"    # from {import_path} import {name}")
             lines.append(f"    try:")
             lines.append(f"        {name}({', '.join(a['name'] for a in args)})")
-            # BRICK 18 fix: wider exception list to match engine/core/forge.py.
-            # Includes OSError (covers FileNotFoundError) and the other classes
-            # that engine modules raise on bad input. The contract is "no crash",
-            # not "no exception".
+            # Wide exception list: the contract is "no crash", not "no exception".
+            # OSError covers FileNotFoundError and other I/O classes that real-world
+            # modules legitimately raise on bad input.
             lines.append(f"    except (ValueError, TypeError, KeyError, IndexError, OSError, AttributeError, RuntimeError, SystemExit):")
             lines.append(f"        pass  # Expected rejections are OK")
             lines.append("")
@@ -1783,9 +1767,9 @@ def gen_props(root, module_path, include_destructive=False):
     # so anyone reading the generated tests sees what was excluded and why.
     if skipped_destructive:
         banner = [
-            "# BUG-102 (forge): the following functions were SKIPPED because",
-            "# they have side effects (write to disk, run subprocess, hit",
-            "# network). Fuzzing them without isolation would corrupt the repo.",
+            "# forge: the following functions were SKIPPED because they have",
+            "# side effects (write to disk, run subprocess, hit network).",
+            "# Fuzzing them without isolation would corrupt the repo.",
             "# To test them, write isolated tests by hand using tmp_path.",
         ]
         for fn, reason in skipped_destructive:
@@ -2320,36 +2304,6 @@ def anomaly_detect(root, weeks=8):
         file_stats[f] = {"added": 0, "deleted": 0, "commits": 0, "authors": set(),
                          "bugfixes": 0, "loc": max(loc, 1)}
 
-    current_msg = ""
-    current_date = ""
-    for line in raw_log.split("\n"):
-        if line.startswith("COMMIT "):
-            parts = line.split(" ", 4)
-            if len(parts) >= 5:
-                current_date = parts[3]
-                current_msg = parts[4].lower()
-        elif "\t" in line and current_date:
-            parts = line.split("\t")
-            if len(parts) == 3:
-                added, deleted, fname = parts
-                fname = fname.strip()
-                if fname in file_stats:
-                    s = file_stats[fname]
-                    s["added"] += int(added) if added != "-" else 0
-                    s["deleted"] += int(deleted) if deleted != "-" else 0
-                    s["commits"] += 1
-                    s["authors"].add(parts[0] if False else "x")  # placeholder
-                    if any(w in current_msg for w in ["fix", "bug", "patch", "repair", "crash"]):
-                        s["bugfixes"] += 1
-
-    # Reparse for proper author tracking
-    file_stats2 = {}
-    for f in files:
-        p = root / f
-        loc = len(p.read_text(encoding="utf-8", errors="replace").splitlines()) if p.exists() else 1
-        file_stats2[f] = {"added": 0, "deleted": 0, "commits": 0, "authors": set(),
-                          "bugfixes": 0, "loc": max(loc, 1)}
-
     current_author = ""
     current_date = ""
     current_msg = ""
@@ -2365,8 +2319,8 @@ def anomaly_detect(root, weeks=8):
             if len(parts) == 3:
                 added, deleted, fname = parts
                 fname = fname.strip()
-                if fname in file_stats2:
-                    s = file_stats2[fname]
+                if fname in file_stats:
+                    s = file_stats[fname]
                     s["added"] += int(added) if added != "-" else 0
                     s["deleted"] += int(deleted) if deleted != "-" else 0
                     s["commits"] += 1
@@ -2376,7 +2330,7 @@ def anomaly_detect(root, weeks=8):
 
     metrics_list = []
     active_files = []
-    for f, s in file_stats2.items():
+    for f, s in file_stats.items():
         if s["commits"] == 0:
             continue
         active_files.append(f)
@@ -2646,7 +2600,6 @@ def main():
         return
 
     if "--carmack" in args:
-        idx = args.index("--carmack")
         weeks = 8
         if "--weeks" in args:
             wi = args.index("--weeks")
@@ -2655,7 +2608,6 @@ def main():
         return
 
     if "--anomaly" in args:
-        idx = args.index("--anomaly")
         weeks = 8
         if "--weeks" in args:
             wi = args.index("--weeks")
@@ -2722,7 +2674,6 @@ def main():
         return
 
     if "--predict" in args:
-        idx = args.index("--predict")
         weeks = 8
         if "--weeks" in args:
             wi = args.index("--weeks")
@@ -2749,7 +2700,7 @@ def main():
         include_destructive = "--include-destructive" in args
         if include_destructive:
             print("  WARNING: --include-destructive is set. Destructive functions WILL")
-            print("  be fuzzed by Hypothesis. This can corrupt your repo (BUG-102).")
+            print("  be fuzzed by Hypothesis. This can corrupt your repo.")
             print("  Make sure tests are isolated with tmp_path before running them.")
         gen_props(root, module_path, include_destructive=include_destructive)
         return

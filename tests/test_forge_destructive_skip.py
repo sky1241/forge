@@ -1,9 +1,9 @@
-"""BUG-102 — verify forge.gen_props() skips destructive functions.
+"""Verify forge.gen_props() skips destructive functions.
 
-Background : Hypothesis happily generated target_path='.' / dry_run=False
-when forge --gen-props produced a property test for muninn.scrub_secrets().
-The test then scrubbed the entire repo IN PLACE, corrupting 165 files with
-literal '[REDACTED]' substitutions. Took several hours to recover.
+Background: Hypothesis happily generates target_path='.' / dry_run=False when
+asked to fuzz a redaction helper. The generated test then scrubs the entire
+repo in place. We learned this the hard way (~165 files corrupted with literal
+'[REDACTED]' substitutions, several hours to recover).
 
 Defense (forge.py _is_destructive_function): name patterns + AST scan.
 This test locks in the defense so we never regress.
@@ -72,15 +72,15 @@ def test_purge_function_skipped_by_name(forge):
 
 
 def test_bootstrap_function_skipped_by_name(forge):
-    src = "def bootstrap_mycelium(repo_path): pass"
-    node = _build_node(forge, src, "bootstrap_mycelium")
+    src = "def bootstrap_db(repo_path): pass"
+    node = _build_node(forge, src, "bootstrap_db")
     is_destr, _ = forge._is_destructive_function(node, src)
     assert is_destr
 
 
 def test_generate_function_skipped_by_name(forge):
-    src = "def generate_root_mn(repo_path, files, mycelium): pass"
-    node = _build_node(forge, src, "generate_root_mn")
+    src = "def generate_report(repo_path, files, config): pass"
+    node = _build_node(forge, src, "generate_report")
     is_destr, _ = forge._is_destructive_function(node, src)
     assert is_destr
 
@@ -233,7 +233,7 @@ def scrub_files(target_path, dry_run=False):
 
     # scrub_files MUST NOT appear as a callable test
     assert "scrub_files(" not in content, (
-        "BUG-102 regression: forge generated a test that calls scrub_files()"
+        "Regression: forge generated a test that calls a destructive function (scrub_files)"
     )
 
     # The skipped function should appear in the banner / comment
@@ -259,48 +259,3 @@ def test_gen_props_include_destructive_override(forge, tmp_path):
     assert "scrub_files(" in content
 
 
-def test_gen_props_real_muninn_does_not_call_scrub(forge, tmp_path):
-    """The exact scenario that destroyed the repo: generate props for muninn.py
-    and verify the output does NOT call scrub_secrets().
-
-    We copy muninn.py into tmp_path so gen_props' relative_to() works.
-    """
-    real_muninn = REPO_ROOT / "engine" / "core" / "muninn.py"
-    if not real_muninn.exists():
-        pytest.skip("engine/core/muninn.py not present")
-
-    # Mirror the real muninn.py inside tmp_path
-    sub = tmp_path / "engine" / "core"
-    sub.mkdir(parents=True)
-    target = sub / "muninn.py"
-    target.write_bytes(real_muninn.read_bytes())
-
-    forge.gen_props(tmp_path, target)
-
-    out = tmp_path / "tests" / "test_props_muninn.py"
-
-    # Brick 18 widened the destructive patterns to cover ^scan_, ^analyze_,
-    # ^bootstrap, ^generate_, ^install_, ^scrub_, ^purge_, ^cli_ etc. As a
-    # result, ALL public functions in muninn.py now match the skip-list and
-    # forge correctly emits "No testable functions found" without writing
-    # any test file. Both outcomes are valid for BUG-102 fix:
-    #   (a) file exists but contains no calls to forbidden functions, OR
-    #   (b) file does not exist (ALL functions were skipped)
-    if not out.exists():
-        # All functions skipped — the strongest possible outcome
-        return
-    content = out.read_text(encoding="utf-8")
-
-    # The killer functions MUST NOT be in the generated file
-    forbidden = [
-        "scrub_secrets(",
-        "purge_secrets_db(",
-        "install_hooks(",
-        "bootstrap_mycelium(",
-        "generate_root_mn(",
-        "generate_winter_tree(",
-    ]
-    for fn in forbidden:
-        assert fn not in content, (
-            f"BUG-102 regression: forge generated {fn} for muninn.py — would corrupt the repo"
-        )

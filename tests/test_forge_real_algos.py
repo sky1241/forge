@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-# Load the root-level forge.py (the drop-in tool), not the muninn.forge module.
+# Load forge.py from the repo root, regardless of how this test is invoked.
 _ROOT = Path(__file__).resolve().parent.parent
 _SPEC = importlib.util.spec_from_file_location("forge_root", _ROOT / "forge.py")
 forge = importlib.util.module_from_spec(_SPEC)
@@ -322,12 +322,13 @@ class TestWaveletDTWHamming:
 
 
 # ---------------------------------------------------------------------------
-# BUG-102 destructive detector (critical defense — was missing tests)
+# Destructive detector (critical defense — pins every shape that caused real-
+# world repo corruption when scrub_* / install_* / write_* fns were fuzzed)
 # ---------------------------------------------------------------------------
 
 class TestDestructiveDetector:
-    """Pin _is_destructive_function: it MUST flag every shape that caused
-    BUG-102 (165 files corrupted when scrub_secrets was fuzzed by Hypothesis).
+    """Pin _is_destructive_function: it MUST flag every shape that has caused
+    repo corruption when fuzzed by Hypothesis without isolation.
     These tests are the regression net."""
 
     def _parse_func(self, source):
@@ -339,7 +340,7 @@ class TestDestructiveDetector:
         raise AssertionError("no FunctionDef in source")
 
     def test_scrub_pattern_caught(self):
-        """The exact BUG-102 case: scrub_secrets() name pattern -> flagged."""
+        """The canonical case: scrub_secrets() name pattern -> flagged."""
         node, src = self._parse_func("def scrub_secrets(target_path, dry_run=True): pass")
         is_destr, reason = forge._is_destructive_function(node, src)
         assert is_destr
