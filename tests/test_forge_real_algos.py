@@ -541,6 +541,84 @@ class TestPytestParserRegression:
         assert forge._parse_pytest_failures(out) == []
 
 
+class TestFindTestsAlsoMatchesUnderscoreTests:
+    """Cousin pc1 cycle 2 finding on mkdocs: 19 test files invisible to forge
+    because they use the *_tests.py suffix (e.g. build_tests.py) instead of
+    test_*.py prefix. pytest accepts both via python_files config; forge
+    must too."""
+
+    def test_underscore_tests_pattern_matches(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FORGE_INCLUDE_BENCHMARKS", raising=False)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_classic.py").write_text("def test_a(): pass\n")
+        (tmp_path / "tests" / "build_tests.py").write_text("def test_b(): pass\n")
+        (tmp_path / "tests" / "cli_tests.py").write_text("def test_c(): pass\n")
+        (tmp_path / "tests" / "thing_test.py").write_text("def test_d(): pass\n")
+        files = forge.find_tests(tmp_path)
+        names = [f.name for f in files]
+        assert "test_classic.py" in names
+        assert "build_tests.py" in names, f"_tests.py suffix must be picked: {names}"
+        assert "cli_tests.py" in names
+        assert "thing_test.py" in names, f"_test.py suffix (singular) must be picked: {names}"
+
+
+class TestFaultLocateTimeoutGraceful:
+    """Cousin pc1 cycle 2 finding on pytest repo: --locate's pytest --cov run
+    timed out after 600s and forge let the bare subprocess.TimeoutExpired
+    bubble up as a Python traceback to the user. Must be caught and surfaced
+    with actionable hints (FORGE_TEST_FILTER, etc.)."""
+
+    def test_locate_handles_timeout_gracefully(self, tmp_path, monkeypatch, capsys):
+        import subprocess as _sp
+        # Minimal valid layout
+        _git_init(tmp_path)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_x.py").write_text("def test_x(): pass\n", encoding="utf-8")
+        _git_commit(tmp_path)
+
+        # Force the pytest --cov run to TimeoutExpired
+        real_run = _sp.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and "-m" in cmd and "pytest" in cmd and "--cov" in cmd:
+                raise _sp.TimeoutExpired(cmd, kwargs.get("timeout", 600))
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        # Should NOT raise
+        forge.fault_locate(tmp_path)
+        out = capsys.readouterr().out
+        assert "TIMEOUT" in out, f"timeout must be surfaced cleanly: {out!r}"
+        assert "FORGE_TEST_FILTER" in out, f"actionable hint missing: {out!r}"
+        # No Python traceback should leak to the user
+        assert "Traceback" not in out
+
+
+class TestGenPropsImportPathStripsInit:
+    """Cousin pc1 cycle 2 finding on mkdocs: gen-props on a package's
+    __init__.py (e.g. mkdocs/utils/__init__.py) generated 'from
+    mkdocs.utils.__init__ import *' instead of 'from mkdocs.utils import *'.
+    Redundant + triggers DeprecationWarning in Python 3.13+."""
+
+    def test_init_module_import_path_is_clean(self, tmp_path, monkeypatch):
+        # Create a fake repo layout mkdocs/utils/__init__.py
+        _git_init(tmp_path)
+        (tmp_path / "mkdocs").mkdir()
+        (tmp_path / "mkdocs" / "utils").mkdir()
+        (tmp_path / "mkdocs" / "utils" / "__init__.py").write_text(
+            "def normalize_path(p):\n    return p.strip()\n", encoding="utf-8"
+        )
+        (tmp_path / "tests").mkdir()
+        _git_commit(tmp_path)
+
+        forge.gen_props(tmp_path, str(tmp_path / "mkdocs" / "utils" / "__init__.py"))
+        out = (tmp_path / "tests" / "test_props___init__.py").read_text()
+        assert "from mkdocs.utils import *" in out, \
+            f"clean import path expected; got:\n{out[:500]}"
+        assert "from mkdocs.utils.__init__ import *" not in out, \
+            f"redundant __init__ import path leaked:\n{out[:500]}"
+
+
 class TestFaultLocateSurfacesCollectionErrors:
     """Pin: --locate must NOT silently say 'no failing tests' when pytest
     actually crashed at collection (exit code 2, 0 PASSED, 0 FAILED).

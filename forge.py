@@ -474,7 +474,13 @@ def find_tests(root):
     Override with FORGE_INCLUDE_BENCHMARKS=1 if you really want them.
     """
     tests = []
-    for pattern in ["tests/test_*.py", "test_*.py", "tests/**/test_*.py", "**/test_*.py"]:
+    # pytest's default python_files = ['test_*.py', '*_test.py'] — many real
+    # repos also use the *_tests.py suffix (mkdocs is the canonical example,
+    # 19 test files invisible to forge before this fix). Cover both.
+    for pattern in [
+        "tests/test_*.py", "test_*.py", "tests/**/test_*.py", "**/test_*.py",
+        "**/*_test.py", "**/*_tests.py",
+    ]:
         tests.extend(root.glob(pattern))
     excludes = [".forge", "__pycache__", ".git", "node_modules"]
     if not os.environ.get("FORGE_INCLUDE_BENCHMARKS"):
@@ -1784,6 +1790,11 @@ def gen_props(root, module_path, include_destructive=False):
     except ValueError:
         rel = Path(os.path.relpath(mod_path, root))
     import_path = str(rel).replace(os.sep, ".").replace(".py", "")
+    # If the module is a package's __init__.py, the dotted path ends with
+    # ".__init__" — explicitly importing the __init__ module is redundant and
+    # triggers DeprecationWarnings in 3.13+. Strip it.
+    if import_path.endswith(".__init__"):
+        import_path = import_path[: -len(".__init__")]
 
     # Build test file — imports are LIVE so the generated test actually runs.
     # We insert BOTH the repo root and the module's parent dir into sys.path,
@@ -2132,8 +2143,19 @@ def fault_locate(root):
         print(f"  (filtered by FORGE_TEST_FILTER={test_filter!r})")
 
     print("  Running tests with per-test coverage...")
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(root),
-                      timeout=600, encoding="utf-8", errors="replace")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(root),
+                          timeout=600, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        # Big repos (pytest, anyio) blow past 10 min on full --cov runs.
+        # Don't crash with a Python traceback — give the user actionable hints.
+        print("\n  TIMEOUT: --locate's pytest --cov run exceeded 10 min.")
+        print(f"  ({len(test_files)} test files × per-test coverage = expensive)")
+        print(f"  Try one of:")
+        print(f"    - FORGE_TEST_FILTER='specific_test_name' forge --locate")
+        print(f"    - run forge default first to identify failing tests, then filter")
+        print(f"    - reduce test_files (delete unused tests/ subdirs in this repo)\n")
+        return
 
     # Parse test results to know which tests passed/failed
     failed_tests = set()
