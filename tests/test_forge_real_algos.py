@@ -541,6 +541,130 @@ class TestPytestParserRegression:
         assert forge._parse_pytest_failures(out) == []
 
 
+class TestRunTestsTracksPerTestNames:
+    """Cousin pc1 cycle 2 deep finding: forge default compared COUNTS only.
+    A swap (test_a passed→fails, test_b fails→passes) nets to delta 0 →
+    'PASS' silently while a real regression hides. Now run_tests stores
+    passed_tests / failed_tests / xpassed_tests / xfailed_tests as sorted
+    lists and print_report compares the SETS to surface flips."""
+
+    def test_run_tests_returns_per_test_lists(self):
+        """The new keys passed_tests / failed_tests / xfailed_tests /
+        xpassed_tests must appear in run_tests's return dict."""
+        # We don't run real pytest here — just verify the parser produces
+        # the right shape from a synthetic output.
+        out = (
+            "tests/test_a.py::test_one PASSED                                 [ 25%]\n"
+            "tests/test_a.py::test_two FAILED                                 [ 50%]\n"
+            "tests/test_a.py::test_three SKIPPED                              [ 75%]\n"
+            "tests/test_b.py::test_xfail XFAIL                                [ 87%]\n"
+            "tests/test_b.py::test_xpass XPASS                                [100%]\n"
+        )
+        by_status = forge._parse_pytest_per_test_status(out)
+        assert by_status["PASSED"] == {"tests/test_a.py::test_one"}
+        assert by_status["FAILED"] == {"tests/test_a.py::test_two"}
+        assert by_status["SKIPPED"] == {"tests/test_a.py::test_three"}
+        assert by_status["XFAIL"] == {"tests/test_b.py::test_xfail"}
+        assert by_status["XPASS"] == {"tests/test_b.py::test_xpass"}
+
+    def test_per_test_parser_ignores_progress_bars(self):
+        """The parser must NOT match pytest progress bar lines like
+        '[FAILED] [ 13%]' which lack a real test id."""
+        out = "[FAILED] [ 13%]\n[PASSED]\nFAILED — bare\n"
+        by_status = forge._parse_pytest_per_test_status(out)
+        for s, ids in by_status.items():
+            assert ids == set(), f"{s} should be empty, got {ids}"
+
+    def test_print_report_surfaces_passed_to_failed_flip(self, capsys):
+        """The hidden-regression case: same total counts, but one test
+        flipped passed→failed. Old forge said 'PASS', new must say
+        'REGRESSION: 1 test flipped passed -> failed'."""
+        baseline = {
+            "passed": 2, "failed": 1, "errors": 0, "skipped": 0, "total": 3,
+            "duration": 1.0, "details": [],
+            "passed_tests": ["tests/test_x.py::a", "tests/test_x.py::b"],
+            "failed_tests": ["tests/test_x.py::c"],
+            "xfailed_tests": [], "xpassed_tests": [],
+        }
+        # Same counts, but test_b NOW fails and test_c NOW passes — silent flip
+        results = {
+            "passed": 2, "failed": 1, "errors": 0, "skipped": 0, "total": 3,
+            "duration": 1.0, "details": [],
+            "passed_tests": ["tests/test_x.py::a", "tests/test_x.py::c"],
+            "failed_tests": ["tests/test_x.py::b"],
+            "xfailed_tests": [], "xpassed_tests": [],
+        }
+        forge.print_report(results, baseline=baseline)
+        out = capsys.readouterr().out
+        assert "REGRESSION" in out, f"hidden regression must be flagged:\n{out}"
+        assert "tests/test_x.py::b" in out, f"flipped test name must be listed:\n{out}"
+        assert "FIX" in out, f"the test that started passing must also be reported:\n{out}"
+        assert "tests/test_x.py::c" in out
+
+    def test_print_report_xpass_unexpected(self, capsys):
+        """A test marked xfail that now passes (XPASS) is a potential
+        semantic regression — the marker is now wrong."""
+        baseline = {
+            "passed": 1, "failed": 0, "errors": 0, "skipped": 0, "total": 1,
+            "duration": 1.0, "details": [],
+            "passed_tests": ["t::a"], "failed_tests": [],
+            "xfailed_tests": ["t::xf"], "xpassed_tests": [],
+        }
+        results = {
+            "passed": 1, "failed": 0, "errors": 0, "skipped": 0, "total": 1,
+            "duration": 1.0, "details": [],
+            "passed_tests": ["t::a"], "failed_tests": [],
+            "xfailed_tests": [], "xpassed_tests": ["t::xf"],
+        }
+        forge.print_report(results, baseline=baseline)
+        out = capsys.readouterr().out
+        assert "XPASS" in out, f"xpass-now must be surfaced:\n{out}"
+        assert "t::xf" in out
+
+    def test_print_report_legacy_baseline_falls_back_to_counts(self, capsys):
+        """When baseline.json is from an older forge version (no
+        passed_tests / failed_tests keys), fall back to count-delta — must
+        not crash."""
+        baseline_legacy = {"passed": 5, "failed": 0, "skipped": 0, "errors": 0,
+                           "total": 5, "duration": 1.0, "details": []}
+        results = {"passed": 4, "failed": 1, "skipped": 0, "errors": 0,
+                   "total": 5, "duration": 1.0,
+                   "details": [{"test": "t::y", "status": "FAILED", "msg": ""}],
+                   "passed_tests": [], "failed_tests": [],
+                   "xfailed_tests": [], "xpassed_tests": []}
+        forge.print_report(results, baseline=baseline_legacy)
+        out = capsys.readouterr().out
+        assert "REGRESSION" in out  # falls back to count-delta correctly
+
+
+class TestFindTestsHonorsTestPaths:
+    """Cousin pc1 cycle 2 finding: pyproject.toml may set testpaths to
+    restrict pytest to specific dirs (e.g. pytest's own repo uses
+    testpaths = ['testing']). When present, find_tests must scope its
+    globs to those paths."""
+
+    def test_testpaths_restrict_glob_root(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FORGE_INCLUDE_BENCHMARKS", raising=False)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_in_tests.py").write_text("def test_a(): pass\n")
+        (tmp_path / "testing").mkdir()
+        (tmp_path / "testing" / "test_in_testing.py").write_text("def test_b(): pass\n")
+        # Without testpaths config: both visible
+        files = forge.find_tests(tmp_path)
+        assert any("tests/test_in_tests.py" in str(f) for f in files)
+        assert any("testing/test_in_testing.py" in str(f) for f in files)
+        # With testpaths=['testing']: only testing/* visible
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.pytest.ini_options]\ntestpaths = ["testing"]\n',
+            encoding="utf-8",
+        )
+        files = forge.find_tests(tmp_path)
+        names = [str(f) for f in files]
+        assert any("testing/test_in_testing.py" in n for n in names)
+        assert not any("tests/test_in_tests.py" in n for n in names), \
+            f"tests/ must be filtered out when testpaths=['testing']: {names}"
+
+
 class TestFindTestsHonorsNoRecursedirs:
     """Cousin pc1 cycle 2 finding on pytest repo: pyproject.toml had
     [tool.pytest.ini_options] norecursedirs but forge globbed every

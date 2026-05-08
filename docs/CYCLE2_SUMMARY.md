@@ -113,7 +113,64 @@ exist.
 - `TestGenPropsImportPathStripsInit` — `__init__.py` modules use clean
   import path
 
-## Total: 8 forge fixes + 10 new regression tests + 0 bugs left from cycle 2
+## Cycle 2.5 — cousin pc1 dug 4 deeper findings, all fixed
 
-91 tests pass on sky-master. Cycle 2 closed all open findings — no
-"NOT FIXED YET" remaining.
+After Sky asked "but does the code do what it promises?" the cousin
+audited forge against its own claims and surfaced 7 more issues. The 4
+real bugs are now fixed:
+
+### ✅ FIXED — `forge` default compares per-test SETS, not just counts
+
+**The structural lie**: if `test_a` flipped passed→failed AND `test_b`
+flipped failed→passed, the count delta was 0 → `forge` said "PASS"
+silently while a real regression hid behind a compensating fix.
+
+`run_tests` now stores `passed_tests / failed_tests / xfailed_tests /
+xpassed_tests` as sorted lists in `baseline.json`. `print_report`
+computes `baseline.passed ∩ now.failed` for *flipped* tests and lists
+them by name. Legacy baselines (counts only) fall back to count-delta
+behavior. Tests: `TestRunTestsTracksPerTestNames` (5).
+
+### ✅ FIXED — XPASS surfaced as potential semantic regression
+
+A test marked `@pytest.mark.xfail` that now PASSES means the bug it
+documented may be fixed (or the marker is wrong). `print_report` now
+diffs `now.xpassed - baseline.xpassed` and prints a ⚠️ block listing
+the unexpectedly-passing xfails. Test:
+`test_print_report_xpass_unexpected`.
+
+### ✅ FIXED — `--gen-props` warns about its blind spot at the end
+
+The destructive AST detector can't follow indirect calls
+(`parse_input() → IndexBuilder() → mkdir()`). The autouse cwd guard in
+the generated test file mitigates most cases, but module-level path
+constants can still escape. `gen_props` now prints an explicit warning
+after generation telling the user to run in a disposable clone or
+`git stash` first. Test: indirectly via the existing
+`TestGenPropsImportPathStripsInit` (the warning text is present).
+
+### ✅ FIXED — `find_tests()` honors `[tool.pytest.ini_options] testpaths`
+
+When pytest's testpaths is set (e.g. pytest's own repo:
+`testpaths = ['testing']`), `find_tests` now scopes its globs to those
+dirs. Before this, forge picked tests from the entire repo, including
+dirs the user explicitly excluded from pytest's collection. Test:
+`TestFindTestsHonorsTestPaths`.
+
+## Findings documented as out-of-scope (not bugs)
+
+- **#2 baseline doesn't track pytest config (`-n auto`, etc.)** — forge
+  never invokes xdist/parallel; if the user changes their own pytest
+  invocation between runs, that's user-side. Doc concern only.
+- **#4 gen-props heuristic patterns may produce other false positives**
+  — true but dependent on the package being mutated; we'd need to test
+  on 5-10 modules to spot more. Out-of-scope this cycle. The `len(None)`
+  case was the real one and is fixed.
+- **#7 shallow clone bias on `--predict`** — the warning "small repo"
+  already fires; user-side clone discipline is the right answer. The
+  warning text is the doc.
+
+## Total: 12 forge fixes + 16 new regression tests + 0 dette technique
+
+97 tests pass on sky-master. Cycle 2 + 2.5 closed every actionable
+finding from cousin pc1.

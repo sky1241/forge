@@ -460,27 +460,41 @@ def find_repo_root():
     return Path.cwd()
 
 
-def _read_pyproject_norecursedirs(root):
-    """Return the list of dirs from [tool.pytest.ini_options] norecursedirs in
-    the repo's pyproject.toml, or [] if absent. Stdlib only — uses tomllib on
-    Python 3.11+, falls back silently otherwise."""
+def _read_pyproject_pytest_options(root):
+    """Return [tool.pytest.ini_options] dict from pyproject.toml, or {}.
+
+    Stdlib only — uses tomllib on Python 3.11+, falls back silently otherwise.
+    Centralized so callers can read `testpaths`, `norecursedirs`, etc.
+    """
     pyproject = root / "pyproject.toml"
     if not pyproject.is_file():
-        return []
+        return {}
     try:
         import tomllib
     except ImportError:
-        return []  # Python < 3.11; not worth pulling tomli
+        return {}
     try:
         with open(pyproject, "rb") as f:
             data = tomllib.load(f)
     except Exception:
-        return []
-    return list(
-        data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get(
-            "norecursedirs", []
-        )
-    )
+        return {}
+    return data.get("tool", {}).get("pytest", {}).get("ini_options", {})
+
+
+def _read_pyproject_norecursedirs(root):
+    """Return the list of dirs from [tool.pytest.ini_options] norecursedirs."""
+    return list(_read_pyproject_pytest_options(root).get("norecursedirs", []))
+
+
+def _read_pyproject_testpaths(root):
+    """Return the list of dirs from [tool.pytest.ini_options] testpaths.
+
+    When set, pytest only collects from these paths. Cousin pc1 cycle 2 found
+    this on pytest's own repo (testpaths = ['testing']) — without honoring it,
+    forge globbed everything from root and ramassait des fichiers que pytest
+    aurait ignorés. Now we use it as a positive filter when present.
+    """
+    return list(_read_pyproject_pytest_options(root).get("testpaths", []))
 
 
 def find_tests(root):
@@ -497,14 +511,23 @@ def find_tests(root):
     Override with FORGE_INCLUDE_BENCHMARKS=1 if you really want them.
     """
     tests = []
+    # If pyproject.toml's [tool.pytest.ini_options] sets testpaths, scope our
+    # globs to those dirs only. Otherwise scan the whole repo.
+    testpaths = _read_pyproject_testpaths(root)
+    glob_roots = (
+        [root / tp for tp in testpaths if (root / tp).is_dir()]
+        if testpaths else [root]
+    )
     # pytest's default python_files = ['test_*.py', '*_test.py'] — many real
     # repos also use the *_tests.py suffix (mkdocs is the canonical example,
     # 19 test files invisible to forge before this fix). Cover both.
-    for pattern in [
+    glob_patterns = [
         "tests/test_*.py", "test_*.py", "tests/**/test_*.py", "**/test_*.py",
         "**/*_test.py", "**/*_tests.py",
-    ]:
-        tests.extend(root.glob(pattern))
+    ]
+    for groot in glob_roots:
+        for pattern in glob_patterns:
+            tests.extend(groot.glob(pattern))
     excludes = [".forge", "__pycache__", ".git", "node_modules"]
     # Honor pyproject.toml's [tool.pytest.ini_options] norecursedirs. Found
     # this on cycle 2 with pytest's own repo: testing/example_scripts/ are
@@ -600,6 +623,12 @@ def run_tests(root, verbose=False):
                     "raw_output": output}
 
     details = _parse_pytest_failures(output)
+    # Track per-test name sets. Required for cycle 2.5 fix: forge default
+    # compares SETS to spot hidden regressions (test_a passed→fails AND
+    # test_b fails→passes nets to delta 0 in counts but is a real regression).
+    by_status = _parse_pytest_per_test_status(output)
+    xfailed_count = len(by_status["XFAIL"])
+    xpassed_count = len(by_status["XPASS"])
 
     return {
         "total": passed + failed + errors + skipped,
@@ -607,9 +636,16 @@ def run_tests(root, verbose=False):
         "failed": failed,
         "errors": errors,
         "skipped": skipped,
+        "xfailed": xfailed_count,
+        "xpassed": xpassed_count,
         "details": details,
         "duration": round(duration, 1),
-        "raw_output": output if verbose else None
+        # Per-test name lists (sorted for deterministic baseline.json diffs).
+        "passed_tests": sorted(by_status["PASSED"]),
+        "failed_tests": sorted(by_status["FAILED"]),
+        "xfailed_tests": sorted(by_status["XFAIL"]),
+        "xpassed_tests": sorted(by_status["XPASS"]),
+        "raw_output": output if verbose else None,
     }
 
 
@@ -627,6 +663,40 @@ def _combine_k_filter(test_filter, extra_filter):
     if test_filter and extra_filter:
         return f"({test_filter}) and ({extra_filter})"
     return test_filter or extra_filter
+
+
+def _parse_pytest_per_test_status(output):
+    """Parse pytest -v output to extract per-test status by name.
+
+    Returns dict[status -> set[test_id]] for these statuses:
+      PASSED, FAILED, SKIPPED, XFAIL, XPASS, ERROR
+
+    pytest -v progress lines look like:
+      "tests/x.py::test_y PASSED                  [ 13%]"
+      "tests/x.py::test_y FAILED                  [ 26%]"
+      "tests/x.py::test_y XFAIL (reason)          [ 39%]"
+      "tests/x.py::test_y XPASS                   [ 52%]"
+
+    Required for the cycle 2.5 fix: forge default needs to compare the
+    SET of passed/failed test names against the baseline, not just the
+    counts. Otherwise a swap (test_a passed→fails AND test_b fails→passes)
+    nets to delta=0 and the user sees "PASS" while a real regression hides.
+    """
+    by_status = {
+        "PASSED": set(), "FAILED": set(), "SKIPPED": set(),
+        "XFAIL": set(), "XPASS": set(), "ERROR": set(),
+    }
+    # Test ID looks like "path/file.py::test_name" possibly with ::class::test
+    # or [param]. Anchor at line start so we don't pick up text inside tracebacks.
+    pattern = re.compile(
+        r"^(\S+(?:::\S+)+)\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS|ERROR)\b"
+    )
+    for line in output.split("\n"):
+        m = pattern.match(line)
+        if m:
+            test_id, status = m.group(1), m.group(2)
+            by_status[status].add(test_id)
+    return by_status
 
 
 def _parse_pytest_failures(output):
@@ -718,10 +788,53 @@ def print_report(results, baseline=None):
         print(f"\n  vs baseline:")
         print(f"    Passed: {bp} -> {passed} ({'+' if delta_p >= 0 else ''}{delta_p})")
         print(f"    Failed: {bf} -> {failed} ({'+' if delta_f >= 0 else ''}{delta_f})")
-        if delta_f > 0:
-            print(f"\n  *** REGRESSION: {delta_f} new failure(s) ***")
-        elif delta_p > bp and failed == 0:
-            print(f"\n  +++ PROGRESS: {delta_p} more passing +++")
+
+        # Per-test set comparison: catches the hidden-regression case where
+        # test_a flips passed→failed AND test_b flips failed→passed (delta=0
+        # in counts, but a real regression). Cousin pc1 cycle 2 finding.
+        baseline_passed = set(baseline.get("passed_tests", []))
+        baseline_failed = set(baseline.get("failed_tests", []))
+        now_passed = set(results.get("passed_tests", []))
+        now_failed = set(results.get("failed_tests", []))
+        # We only enter set-based diff when the baseline actually has the
+        # per-test name lists (not legacy baseline.json without them).
+        has_set_data = bool(baseline_passed or baseline_failed) and bool(now_passed or now_failed)
+        if has_set_data:
+            new_failures = sorted(baseline_passed & now_failed)
+            new_fixes = sorted(baseline_failed & now_passed)
+            still_failing = sorted(baseline_failed & now_failed)
+            if new_failures:
+                print(f"\n  *** REGRESSION: {len(new_failures)} test(s) flipped passed -> failed ***")
+                for t in new_failures[:10]:
+                    print(f"      {t}")
+                if len(new_failures) > 10:
+                    print(f"      ... and {len(new_failures) - 10} more")
+            if new_fixes:
+                print(f"\n  +++ FIX: {len(new_fixes)} test(s) flipped failed -> passed +++")
+                for t in new_fixes[:5]:
+                    print(f"      {t}")
+            if still_failing and not new_failures and not new_fixes:
+                print(f"\n  ({len(still_failing)} test(s) still failing — same set as baseline)")
+            if not new_failures and not new_fixes:
+                # Counts match AND no individual flip → real OK
+                pass
+        else:
+            # Legacy baseline.json (counts only) — fall back to count delta
+            if delta_f > 0:
+                print(f"\n  *** REGRESSION: {delta_f} new failure(s) ***")
+            elif delta_p > bp and failed == 0:
+                print(f"\n  +++ PROGRESS: {delta_p} more passing +++")
+
+        # XPASS surfacing: test marked xfail that now PASSES is a potential
+        # semantic regression — the marker is now wrong.
+        baseline_xpassed = set(baseline.get("xpassed_tests", []))
+        now_xpassed = set(results.get("xpassed_tests", []))
+        new_xpassed = sorted(now_xpassed - baseline_xpassed)
+        if new_xpassed:
+            print(f"\n  ⚠️  XPASS: {len(new_xpassed)} test(s) marked xfail now pass unexpectedly:")
+            for t in new_xpassed[:5]:
+                print(f"      {t}")
+            print(f"      → review the @pytest.mark.xfail marker; the bug may be fixed.")
 
     # Failure details
     if results["details"]:
@@ -1991,6 +2104,17 @@ def gen_props(root, module_path, include_destructive=False):
         __import__("hypothesis")
     except ImportError:
         print(f"  Note: pip install hypothesis to run these tests")
+
+    # Cousin pc1 cycle 2 finding (rephrased for visibility): the destructive
+    # detector is a name-pattern + AST-call scan, NOT a runtime escape analysis.
+    # If a fuzzed function call goes through a 3rd-party helper that internally
+    # touches the FS (e.g. parse_input() -> IndexBuilder() -> mkdir()), forge
+    # CAN'T see it. The autouse cwd guard injected in the test file mitigates
+    # most cases, but write paths held in module-level constants can escape.
+    print(f"  ⚠️  AST scan does NOT follow indirect calls. The autouse cwd")
+    print(f"      fixture chdirs each test into tmp_path so most file writes")
+    print(f"      land in pytest's sandbox. But run in a disposable clone or")
+    print(f"      `git stash` first if you've never run gen-props on this repo.")
 
 
 # === AXE 3: MUTATION TESTING — Pure Python engine (DeMillo 1978, Offutt 1996) ===
