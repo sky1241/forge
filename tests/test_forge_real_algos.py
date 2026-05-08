@@ -13,7 +13,6 @@ We replaced 3 placeholder implementations with their real, named-correctly forms
 Each test pins to a published reference value or to a hand-checked case so
 regressions show up loudly.
 """
-import importlib.util
 import math
 import subprocess
 import sys
@@ -21,12 +20,11 @@ from pathlib import Path
 
 import pytest
 
-# Load forge.py from the repo root, regardless of how this test is invoked.
-_ROOT = Path(__file__).resolve().parent.parent
-_SPEC = importlib.util.spec_from_file_location("forge_root", _ROOT / "forge.py")
-forge = importlib.util.module_from_spec(_SPEC)
-sys.modules["forge_root"] = forge
-_SPEC.loader.exec_module(forge)
+# tests/conftest.py prepends the repo root to sys.path so this resolves to
+# the canonical forge.py at the repo root. Importing under its real name is
+# what makes `pytest --cov=forge` work — the prior importlib alias hid the
+# module from coverage's discovery.
+import forge
 
 
 # ---------------------------------------------------------------------------

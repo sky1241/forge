@@ -8,7 +8,6 @@ repo in place. We learned this the hard way (~165 files corrupted with literal
 Defense (forge.py _is_destructive_function): name patterns + AST scan.
 This test locks in the defense so we never regress.
 """
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -17,17 +16,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _import_forge():
-    """Load the root forge.py as a module (independent of import path)."""
-    spec = importlib.util.spec_from_file_location("forge_root", REPO_ROOT / "forge.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 @pytest.fixture(scope="module")
 def forge():
-    return _import_forge()
+    """Yield the canonical forge module. Repo root is on sys.path via
+    tests/conftest.py, so this is just `import forge` under its real name —
+    no importlib alias dance. That's also what makes coverage work."""
+    import forge as _forge
+    return _forge
 
 
 def _build_node(forge, source, func_name):
