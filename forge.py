@@ -675,6 +675,52 @@ def _run_git_full(
         )
 
 
+# === SHARED HELPERS — cycle 4 D-1 dedupe ===
+def _pytest_cmd(*extra_args: str) -> list[str]:
+    """Build a `[python -m pytest, ...args]` command list.
+
+    Pre-D-1 the prefix `[sys.executable, "-m", "pytest"]` was repeated
+    verbatim in 6 sites (run_tests, bisect_test, run_fast, _test_with_input,
+    run_mutation, fault_locate). Centralizing here so a future change to
+    how forge invokes pytest (e.g. switching to `pytest --quiet` everywhere
+    by default) lands in one place.
+    """
+    return [sys.executable, "-m", "pytest", *extra_args]
+
+
+def _minmax_normalize(values: list[float]) -> list[float]:
+    """Min-max normalize a list of floats into [0, 1]. Returns 0.0 for every
+    element when the range is zero (single-value or all-equal input).
+
+    Pre-D-1: this loop was duplicated in predict_carmack's local `_norm`
+    nested function and approximated in predict_defects (over a dict of
+    dicts). predict_defects keeps its own loop because it normalizes
+    multiple keys across a dict-of-dicts shape that doesn't reduce to a
+    flat list cleanly; this helper covers the simple list case (used by
+    predict_carmack across kalman / wavelet / crash / coupling / churn).
+    """
+    if not values:
+        return []
+    lo = min(values)
+    hi = max(values)
+    rng = hi - lo
+    return [(v - lo) / rng if rng > 0 else 0.0 for v in values]
+
+
+def _parse_iso(s: str) -> datetime:
+    """Parse an ISO-8601 timestamp string into a datetime, accepting the
+    legacy `Z` suffix that pre-3.11 datetime.fromisoformat rejected.
+
+    Pre-D-1 the `datetime.fromisoformat(d.replace("Z", "+00:00"))` pattern
+    was inlined in 5 sites across predict_defects, predict_carmack, and
+    anomaly_detect. Once forge moves to require Python 3.11+, the
+    `.replace("Z", "+00:00")` becomes a no-op (3.11 fromisoformat handles
+    `Z` natively) — having the helper means we can drop the workaround
+    in a single edit later.
+    """
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
 GIT_NUMSTAT_FORMAT = "COMMIT %H %ae %aI %s"
 
 
@@ -869,7 +915,7 @@ def run_tests(root: Path, verbose: bool = False) -> dict[str, Any]:
     start = time.time()
     # Pass tests/ if it exists, else pass discovered files individually
     test_target = "tests/" if (root / "tests").is_dir() else [str(t.relative_to(root)) for t in test_files]
-    cmd = [sys.executable, "-m", "pytest"]
+    cmd = _pytest_cmd()
     cmd.extend([test_target] if isinstance(test_target, str) else test_target)
     cmd.extend(["-v", "--tb=short"])
     # --timeout requires pytest-timeout; skip if not installed (silent crash otherwise).
@@ -1482,8 +1528,8 @@ def bisect_test(root: Path, test_name: str) -> None:
     # subprocess.run calls below from receiving None in cmd_test.
     k_expr = _combine_k_filter(_get_test_filter(), test_name)
     assert k_expr is not None
-    cmd_test: list[str] = [sys.executable, "-m", "pytest", "-x", "-q", "--tb=line",
-                           "--no-header", "-k", k_expr]
+    cmd_test: list[str] = _pytest_cmd("-x", "-q", "--tb=line",
+                                       "--no-header", "-k", k_expr)
     try:
         result = subprocess.run(cmd_test, capture_output=True, text=True,
                                 cwd=str(root), encoding="utf-8", errors="replace",
@@ -1662,8 +1708,8 @@ def run_fast(root: Path, verbose: bool = False) -> None:
 
     print(f"  Running {len(test_files)} impacted test file(s)...")
     start = time.time()
-    cmd = [sys.executable, "-m", "pytest"] + [str(f) for f in test_files] + \
-          ["-v", "--tb=short", "-q", "--no-header"]
+    cmd = _pytest_cmd(*[str(f) for f in test_files],
+                      "-v", "--tb=short", "-q", "--no-header")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
@@ -1872,8 +1918,7 @@ def predict_defects(root: Path, weeks: int | None = None) -> None:
         burst = 0
         if s["dates"]:
             try:
-                timestamps = sorted([datetime.fromisoformat(d.replace("Z", "+00:00")).timestamp()
-                                    for d in s["dates"]])
+                timestamps = sorted([_parse_iso(d).timestamp() for d in s["dates"]])
                 for i, t in enumerate(timestamps):
                     count = sum(1 for t2 in timestamps[i:] if t2 - t <= 48 * 3600)
                     burst = max(burst, count)
@@ -1884,7 +1929,7 @@ def predict_defects(root: Path, weeks: int | None = None) -> None:
         loc = s["loc"]
         # Recency: 1 / (1 + days since last change)
         try:
-            last = max(datetime.fromisoformat(d.replace("Z", "+00:00")) for d in s["dates"])
+            last = max(_parse_iso(d) for d in s["dates"])
             days_ago = (datetime.now(last.tzinfo) - last).days
             recency = 1.0 / (1.0 + days_ago)
         except (ValueError, TypeError):
@@ -2035,8 +2080,8 @@ def _test_with_input(
         # so the value can be tuned without forking forge.py.
         if timeout is None:
             timeout = _load_forge_config(root)["pytest_per_test_timeout_seconds"]
-        r = subprocess.run([sys.executable, "-m", "pytest", "-x", "-q", "--tb=no",
-                           "--no-header", "-k", test_name],
+        r = subprocess.run(_pytest_cmd("-x", "-q", "--tb=no",
+                                       "--no-header", "-k", test_name),
                           capture_output=True, text=True, cwd=str(root),
                           env=env, timeout=timeout, encoding="utf-8", errors="replace")
         return "failed" in r.stdout.lower() or "error" in r.stdout.lower()
@@ -2611,8 +2656,7 @@ def _try_one_mutant(
     try:
         src.write_text(mut_source, encoding="utf-8")
         r = subprocess.run(
-            [sys.executable, "-m", "pytest"] + test_paths +
-            ["-x", "-q", "--tb=no", "--no-header"],
+            _pytest_cmd(*test_paths, "-x", "-q", "--tb=no", "--no-header"),
             capture_output=True, text=True, cwd=str(root),
             timeout=timeout, encoding="utf-8", errors="replace",
         )
@@ -2796,8 +2840,8 @@ def fault_locate(root: Path) -> None:
         cov_file.unlink()
 
     os.makedirs(str(root / FORGE_DIR), exist_ok=True)
-    cmd = [sys.executable, "-m", "pytest"] + [str(f) for f in test_files] + \
-          ["--cov", "--cov-context=test", "-v", "--tb=no", "--no-header"]
+    cmd = _pytest_cmd(*[str(f) for f in test_files],
+                      "--cov", "--cov-context=test", "-v", "--tb=no", "--no-header")
     # Honor FORGE_TEST_FILTER so this command's failure picture stays in
     # sync with the rest of forge (run_tests, --flaky, etc.).
     test_filter = _get_test_filter()
@@ -3010,11 +3054,9 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
         all_dates.extend(s["dates"])
     try:
         baseline_ts = min(
-            datetime.fromisoformat(d.replace("Z", "+00:00")).timestamp()
-            for d in all_dates
+            _parse_iso(d).timestamp() for d in all_dates
         ) if all_dates else 0.0
-        now_ts = datetime.now(datetime.fromisoformat(
-            all_dates[0].replace("Z", "+00:00")).tzinfo).timestamp() if all_dates else 0.0
+        now_ts = datetime.now(_parse_iso(all_dates[0]).tzinfo).timestamp() if all_dates else 0.0
     except (ValueError, TypeError):
         baseline_ts = 0.0
         now_ts = 0.0
@@ -3044,8 +3086,7 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
         if s["bugfix_dates"]:
             try:
                 bf_ts = sorted(
-                    datetime.fromisoformat(d.replace("Z", "+00:00")).timestamp()
-                    for d in s["bugfix_dates"]
+                    _parse_iso(d).timestamp() for d in s["bugfix_dates"]
                 )
                 # Bucket bugfix events into weekly bins from baseline -> now.
                 if now_ts > baseline_ts:
@@ -3074,7 +3115,7 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
             obs = []
             bf_set = set(s.get("bugfix_dates", []))
             for d in s["dates"]:
-                t = datetime.fromisoformat(d.replace("Z", "+00:00")).timestamp()
+                t = _parse_iso(d).timestamp()
                 days = (t - baseline_ts) / 86400.0
                 obs.append((days, d in bf_set))
             if obs:
@@ -3108,17 +3149,13 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
     # This way each axis contributes its full weight instead of being clipped
     # by an arbitrary cap (different signals live on different scales now:
     # Kalman ~ weekly bug count, wavelet ~ multi-band churn energy, KM ~ [0,1]).
-    def _norm(values: list[float]) -> list[float]:
-        lo = min(values)
-        hi = max(values)
-        rng = hi - lo
-        return [(v - lo) / rng if rng > 0 else 0.0 for v in values]
-
-    kalman_n = _norm([r["kalman"] for r in results])
-    wave_n = _norm([r["wavelet_hf"] for r in results])
+    # Cycle 4 D-1: the inline `_norm` was a duplicate of _minmax_normalize
+    # (top-level helper). Switched to the shared helper.
+    kalman_n = _minmax_normalize([r["kalman"] for r in results])
+    wave_n = _minmax_normalize([r["wavelet_hf"] for r in results])
     crash_n = [r["crash_prob"] for r in results]  # already in [0, 1]
-    coupling_n = _norm([r["coupling"] for r in results])
-    churn_n = _norm([r["churn"] for r in results])
+    coupling_n = _minmax_normalize([r["coupling"] for r in results])
+    churn_n = _minmax_normalize([r["churn"] for r in results])
 
     # Composite Carmack score (heuristic weights, sum to 1.0).
     # NOTE: weights are not validated empirically — they reflect the relative
