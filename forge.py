@@ -162,26 +162,52 @@ def _load_forge_config(root):
     flip a behavior. Returns a flat dict with every key in
     FORGE_CONFIG_DEFAULTS guaranteed to be present.
     """
+    cfg, _sources = _load_forge_config_with_sources(root)
+    return cfg
+
+
+def _load_forge_config_with_sources(root):
+    """Same as _load_forge_config but also returns the set of keys
+    that came from `.forge/config.json` (vs defaults). Lets callers
+    annotate prints with `(from .forge/config.json)` vs `(default)`
+    so the user sees exactly which knobs they're effectively running
+    with. Cycle 4 P10 observability fix.
+
+    Returns (cfg: dict, overridden: set[str]).
+    """
     cfg = dict(FORGE_CONFIG_DEFAULTS)
+    overridden = set()
     config_path = Path(root) / FORGE_DIR / "config.json"
     if not config_path.exists():
-        return cfg
+        return cfg, overridden
     try:
         user = load_json(str(config_path)) or {}
     except (OSError, ValueError):
-        return cfg
+        return cfg, overridden
     if not isinstance(user, dict):
-        return cfg
+        return cfg, overridden
     unknown = []
     for key, value in user.items():
         if key in cfg:
             cfg[key] = value
+            overridden.add(key)
         else:
             unknown.append(key)
     if unknown:
+        # The warning preserves cycle 3 chunk 6 behavior — typos in
+        # config.json no longer silently change nothing. P10 adds the
+        # `did you mean` hint via difflib for typos close to a real key.
+        import difflib
+        msg_parts = []
+        for key in sorted(unknown):
+            close = difflib.get_close_matches(key, list(cfg), n=1, cutoff=0.6)
+            if close:
+                msg_parts.append(f"{key} (did you mean: {close[0]}?)")
+            else:
+                msg_parts.append(key)
         print(f"  WARNING: .forge/config.json has unknown keys (ignored): "
-              f"{', '.join(sorted(unknown))}")
-    return cfg
+              f"{', '.join(msg_parts)}")
+    return cfg, overridden
 
 
 # === CARMACK MOVES — Cross-domain algorithms ===
@@ -1960,7 +1986,7 @@ def _rebuild_input(chunks, fmt, original_content=""):
     return "\n".join(chunks)
 
 
-def _test_with_input(root, test_name, input_content, input_ext):
+def _test_with_input(root, test_name, input_content, input_ext, timeout=None):
     """Write input to temp file and run test. Returns True if test FAILS."""
     import tempfile
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=input_ext, delete=False,
@@ -1970,10 +1996,15 @@ def _test_with_input(root, test_name, input_content, input_ext):
         tmp.close()
         env = os.environ.copy()
         env["FORGE_MINIMIZE_INPUT"] = tmp.name
+        # Cycle 4 P10: cfg-driven timeout (was hardcoded 30s). Caller
+        # in minimize_input passes cfg["pytest_per_test_timeout_seconds"]
+        # so the value can be tuned without forking forge.py.
+        if timeout is None:
+            timeout = _load_forge_config(root)["pytest_per_test_timeout_seconds"]
         r = subprocess.run([sys.executable, "-m", "pytest", "-x", "-q", "--tb=no",
                            "--no-header", "-k", test_name],
                           capture_output=True, text=True, cwd=str(root),
-                          env=env, timeout=30, encoding="utf-8", errors="replace")
+                          env=env, timeout=timeout, encoding="utf-8", errors="replace")
         return "failed" in r.stdout.lower() or "error" in r.stdout.lower()
     except subprocess.TimeoutExpired:
         return False  # timeout = can't confirm failure
@@ -2587,8 +2618,16 @@ def run_mutation(root, target_file=None, cfg=None):
 
     test_paths = [str(f) for f in test_files]
     if cfg is None:
-        cfg = _load_forge_config(root)
+        cfg, overridden = _load_forge_config_with_sources(root)
+    else:
+        # Caller passed a pre-built cfg (e.g. main()); we can't tell which
+        # keys came from config.json vs defaults at this point. Re-read
+        # for the source set; cheap (one json read), only happens once per
+        # --mutate invocation.
+        _, overridden = _load_forge_config_with_sources(root)
     threshold_pct = cfg["mutation_threshold_pct"]
+    threshold_src = ("from .forge/config.json"
+                     if "mutation_threshold_pct" in overridden else "default")
     # Per-mutant timeout precedence: FORGE_MUTATE_TIMEOUT env var > config
     # `mutation_per_target_timeout_seconds` (if set) > derive from baseline
     # duration. The env var preserves the legacy escape hatch users have
@@ -2599,16 +2638,19 @@ def run_mutation(root, target_file=None, cfg=None):
     cfg_timeout = cfg.get("mutation_per_target_timeout_seconds")
     if mutate_timeout_env and mutate_timeout_env.isdigit():
         mutant_timeout = int(mutate_timeout_env)
+        timeout_src = "from FORGE_MUTATE_TIMEOUT env"
     elif isinstance(cfg_timeout, int) and cfg_timeout > 0:
         mutant_timeout = cfg_timeout
+        timeout_src = "from .forge/config.json"
     else:
         baseline = load_json(str(root / BASELINE_FILE))
         baseline_dur = float(baseline.get("duration", 0)) if baseline else 0
         # 2x baseline + 10s safety margin, clamped [60, 600]
         mutant_timeout = max(60, min(600, int(baseline_dur * 2) + 10))
-    print(f"  per-mutant timeout: {mutant_timeout}s "
-          f"(set FORGE_MUTATE_TIMEOUT=N or .forge/config.json "
-          f"mutation_per_target_timeout_seconds to override)")
+        timeout_src = "auto-derived from baseline"
+    print(f"  per-mutant timeout: {mutant_timeout}s ({timeout_src}; "
+          f"override via FORGE_MUTATE_TIMEOUT=N or "
+          f"mutation_per_target_timeout_seconds in .forge/config.json)")
 
     killed = 0
     survived = 0
@@ -2666,7 +2708,7 @@ def run_mutation(root, target_file=None, cfg=None):
     print(f"  Killed:         {killed}")
     print(f"  Survived:       {survived}")
     print(f"  Timeouts:       {timeout_count}  (counted as killed)")
-    print(f"  Score:          {score:.0f}% (threshold: {threshold_pct}%)")
+    print(f"  Score:          {score:.0f}% (threshold: {threshold_pct}% — {threshold_src})")
     # Warning when timeouts dominate — signals that the timeout calibration
     # is too tight, OR the test suite genuinely doesn't exercise the file.
     if total > 0 and timeout_count / total > 0.2:
@@ -2725,13 +2767,15 @@ def fault_locate(root):
         print(f"  (filtered by FORGE_TEST_FILTER={test_filter!r})")
 
     print("  Running tests with per-test coverage...")
+    locate_timeout = cfg["test_runner_timeout_seconds"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(root),
-                          timeout=600, encoding="utf-8", errors="replace")
+                          timeout=locate_timeout, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
-        # Big repos (pytest, anyio) blow past 10 min on full --cov runs.
-        # Don't crash with a Python traceback — give the user actionable hints.
-        print("\n  TIMEOUT: --locate's pytest --cov run exceeded 10 min.")
+        # Big repos (pytest, anyio) blow past the runner timeout on full
+        # --cov runs. Don't crash with a Python traceback — give the user
+        # actionable hints.
+        print(f"\n  TIMEOUT: --locate's pytest --cov run exceeded {locate_timeout}s.")
         print(f"  ({len(test_files)} test files × per-test coverage = expensive)")
         print(f"  Try one of:")
         print(f"    - FORGE_TEST_FILTER='specific_test_name' forge --locate")

@@ -2304,6 +2304,147 @@ class TestCycle3CliValidation:
         assert "--carmack" in out
 
 
+class TestCycle4P10ObservabilityAndTimeouts:
+    """Cycle 4 P10: 3 leftover threads.
+
+      1. Hardcoded timeout=30 in _test_with_input (minimize_input helper)
+         and timeout=600 in fault_locate — both should read cfg.
+      2. Config typos: warning existed but no `did you mean` hint.
+      3. Run-time observability: when forge prints `threshold: 50%`
+         the user can't tell if it's the default or their override.
+    """
+
+    def test_load_config_with_sources_reports_overridden_keys(self, tmp_path):
+        """The new helper returns (cfg, set of keys from config.json)."""
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        (tmp_path / forge.FORGE_DIR / "config.json").write_text(json.dumps({
+            "mutation_threshold_pct": 60,
+            "ochiai_top_n": 20,
+        }))
+        cfg, sources = forge._load_forge_config_with_sources(tmp_path)
+        assert cfg["mutation_threshold_pct"] == 60
+        assert cfg["ochiai_top_n"] == 20
+        assert sources == {"mutation_threshold_pct", "ochiai_top_n"}
+        # Default keys must NOT be in sources
+        assert "predict_horizon_weeks" not in sources
+
+    def test_load_config_with_sources_no_file_returns_empty_set(self, tmp_path):
+        cfg, sources = forge._load_forge_config_with_sources(tmp_path)
+        assert sources == set()
+        # All defaults still present
+        assert cfg == forge.FORGE_CONFIG_DEFAULTS
+
+    def test_unknown_key_with_close_match_gets_did_you_mean(self, tmp_path, capsys):
+        """Typo `mutation_threshhold_pct` → suggest `mutation_threshold_pct`."""
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        (tmp_path / forge.FORGE_DIR / "config.json").write_text(json.dumps({
+            "mutation_threshhold_pct": 50,  # extra h
+        }))
+        forge._load_forge_config(tmp_path)
+        out = capsys.readouterr().out
+        assert "did you mean" in out.lower()
+        assert "mutation_threshold_pct" in out  # the corrected name
+
+    def test_unknown_key_unrelated_no_did_you_mean_noise(self, tmp_path, capsys):
+        """A truly unrelated key (e.g. `frobulator`) should NOT get a
+        suggestion — difflib cutoff prevents random distance-7 matches."""
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        (tmp_path / forge.FORGE_DIR / "config.json").write_text(json.dumps({
+            "frobulator": 42,
+        }))
+        forge._load_forge_config(tmp_path)
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "frobulator" in out
+        # No "did you mean" — `frobulator` doesn't match any known key
+        assert "did you mean" not in out.lower()
+
+    def test_test_with_input_uses_cfg_timeout(self, tmp_path, monkeypatch):
+        """_test_with_input now reads cfg["pytest_per_test_timeout_seconds"]
+        when no timeout is passed. Pre-P10: hardcoded 30."""
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        (tmp_path / forge.FORGE_DIR / "config.json").write_text(json.dumps({
+            "pytest_per_test_timeout_seconds": 99,
+        }))
+        captured_timeout = []
+
+        def fake_run(cmd, *a, **kw):
+            captured_timeout.append(kw.get("timeout"))
+            return subprocess.CompletedProcess(args=cmd, returncode=0,
+                                                stdout="", stderr="")
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        forge._test_with_input(tmp_path, "test_x", "data", ".txt")
+        assert captured_timeout == [99], (
+            f"_test_with_input should pass cfg timeout, got {captured_timeout}"
+        )
+
+    def test_test_with_input_explicit_timeout_overrides_cfg(self, tmp_path, monkeypatch):
+        """If a caller passes timeout=N explicitly, that wins over cfg."""
+        # The helper writes a tempfile under root/.forge/ so the dir must exist
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        captured_timeout = []
+
+        def fake_run(cmd, *a, **kw):
+            captured_timeout.append(kw.get("timeout"))
+            return subprocess.CompletedProcess(args=cmd, returncode=0,
+                                                stdout="", stderr="")
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        forge._test_with_input(tmp_path, "test_x", "data", ".txt", timeout=12)
+        assert captured_timeout == [12]
+
+    def test_run_mutation_prints_threshold_source_when_from_config(self, tmp_path,
+                                                                    monkeypatch, capsys):
+        """When mutation_threshold_pct comes from config.json, the
+        print line says `(threshold: X% — from .forge/config.json)`,
+        not just `(threshold: X%)`. Cycle 4 P10 observability."""
+        # Build a minimal repo with a tiny module + a passing test
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True,
+                       capture_output=True)
+        (repo / "src.py").write_text("def add(a, b):\n    return a + b\n")
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_x.py").write_text(
+            "import sys, os\n"
+            "sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n"
+            "from src import add\n"
+            "def test_a(): assert add(1, 2) == 3\n"
+        )
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "add", "-A"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-m", "init", "-q"], cwd=str(repo),
+                       check=True, capture_output=True)
+        # Override threshold in config
+        (repo / forge.FORGE_DIR).mkdir(parents=True)
+        (repo / forge.FORGE_DIR / "config.json").write_text(json.dumps({
+            "mutation_threshold_pct": 50,
+        }))
+        # Monkeypatch subprocess.run so pytest "kills" all mutants quickly
+        original_run = subprocess.run
+
+        def fake_run(cmd, *a, **kw):
+            if cmd and cmd[0] == sys.executable and "pytest" in cmd[1:3]:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=1,  # nonzero → mutant killed
+                    stdout="", stderr="",
+                )
+            return original_run(cmd, *a, **kw)
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        forge.run_mutation(repo, target_file="src.py")
+        out = capsys.readouterr().out
+        # The threshold line must reference the config source
+        assert "from .forge/config.json" in out, (
+            f"threshold print should annotate the source on override:\n{out[-500:]}"
+        )
+        # AND the auto-derive timeout line should also have a source label
+        # (one of "from FORGE_MUTATE_TIMEOUT env", "from .forge/config.json",
+        # or "auto-derived from baseline")
+        assert any(s in out for s in (
+            "auto-derived from baseline", "from .forge/config.json"
+        )), f"timeout source label expected:\n{out[:500]}"
+
+
 class TestCycle4P9RuntimeBugs:
     """Cycle 4 P9: cousin pc1 audit cycle 3 (agent 4 runtime) flagged
     two silent-fail patterns that cycle 3 didn't address.
