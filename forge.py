@@ -49,6 +49,23 @@ from typing import Any, Iterator, Sequence
 import ast
 import math
 
+
+# Cycle 4 H-2 — pulled from the installed wheel/sdist metadata so the
+# string can never drift from pyproject.toml's `version = ...`. Two
+# fallbacks: PackageNotFoundError when running directly from a checkout
+# (`python forge.py` without `pip install -e .`), and ImportError on
+# Python < 3.8 (defensive — we declare 3.11+, but defensive against
+# weird embed contexts).
+try:
+    from importlib.metadata import version as _pkg_version, PackageNotFoundError
+    try:
+        __version__: str = _pkg_version("forge-shield")
+    except PackageNotFoundError:
+        __version__ = "0.0.0-dev"
+except ImportError:
+    __version__ = "unknown"
+
+
 def _safe_path(filepath: str | Path) -> str:
     """Sanitize path for display — never show absolute paths."""
     p = Path(filepath)
@@ -3712,6 +3729,7 @@ BUGS
 OPTIONS
   -v, --verbose                    verbose pytest output
   -h, --help                       show this help
+  --version                        print forge-shield version and exit
   --diff                           show diff vs baseline (with default run)
   --full-cycle                     init + baseline + carmack + heatmap (everything)
 
@@ -3724,7 +3742,7 @@ KNOWN_FLAGS = {
     # short flags
     "-h", "-v",
     # boolean / action flags (no value, or value provided as next non-flag arg)
-    "--help", "--baseline", "--init", "--fast", "--watch", "--full-cycle",
+    "--help", "--version", "--baseline", "--init", "--fast", "--watch", "--full-cycle",
     "--carmack", "--anomaly", "--heatmap", "--locate", "--predict",
     "--snapshot-check", "--diff", "--verbose", "--include-destructive",
     # flags that take a value
@@ -3848,6 +3866,10 @@ def main() -> None:
 
     if "-h" in args or "--help" in args:
         print(HELP_TEXT)
+        return
+
+    if "--version" in args:
+        print(f"forge-shield {__version__}")
         return
 
     # Expand --key=value → --key, value so the dispatch below + the

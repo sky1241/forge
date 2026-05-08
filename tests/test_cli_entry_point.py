@@ -253,3 +253,30 @@ class TestCycle4H1ExitCodesOnMissingDeps:
             f"install hint not surfaced:\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
+
+
+class TestCycle4H2VersionFlag:
+    """Cycle 4 H-2: pin that `forge --version` prints a stable, parseable
+    version string and exits 0. Pre-H-2 the flag didn't exist, so users
+    couldn't report bugs with their installed version."""
+
+    def test_version_flag_returns_stable_string(self) -> None:
+        """`forge --version` exits 0, prints `forge-shield X.Y.Z` (or
+        `forge-shield 0.0.0-dev` when run from a checkout without
+        `pip install -e .`)."""
+        import re
+        result = _run_forge("--version", timeout=10)
+        assert result.returncode == 0, (
+            f"forge --version should exit 0; got {result.returncode}\n"
+            f"stderr: {result.stderr}"
+        )
+        # Match `forge-shield <semver>` OR `forge-shield 0.0.0-dev`.
+        # We don't pin the exact version (would drift each release);
+        # just that the format is stable and machine-parseable.
+        out = result.stdout.strip()
+        assert re.match(
+            r"^forge-shield (\d+\.\d+\.\d+|0\.0\.0-dev|unknown)$", out
+        ), (
+            f"--version output didn't match expected pattern;\n"
+            f"got: {out!r}"
+        )
