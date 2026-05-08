@@ -62,7 +62,9 @@ pip install 'forge-shield[all]'      # everything above
 | `forge --baseline` | Snapshot the suite |
 | `forge --predict` | Rank files by churn-based defect risk |
 | `forge --carmack` | Multi-signal risk score |
-| `forge --mutate` | Mutation testing |
+| `forge --modularity` | Newman-Girvan Q over the import graph |
+| `forge --mutate` | Mutation testing (whole repo) |
+| `forge --mutate --paths-to-mutate FILE` | Mutation testing scoped to one validated file |
 | `forge --locate` | Ochiai SBFL fault localization |
 | `forge --gen-props` | Hypothesis property tests |
 | `forge --bisect TEST` | Bisect a failing test back to its commit |
