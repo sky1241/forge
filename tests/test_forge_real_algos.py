@@ -2304,6 +2304,196 @@ class TestCycle3CliValidation:
         assert "--carmack" in out
 
 
+class TestCycle4P11WeeksFlowsThroughDispatch:
+    """Cycle 4 P11: cousin pc1 auto-audit caught a subtle bug — the
+    test_every_cfg_key_wired_or_explicit_optout lock test (P1) checks
+    that `cfg["predict_horizon_weeks"]` is REFERENCED in forge.py, but
+    not that the CALLERS use it. Pre-P11 main() and full_cycle had 6
+    sites of `weeks = 8` hardcoded:
+
+      L3331 full_cycle predict_defects(weeks=8)
+      L3335 full_cycle predict_carmack(weeks=8)
+      L3393 full_cycle anomaly_detect(weeks=8)
+      L3609 main()    --carmack: weeks = 8
+      L3617 main()    --anomaly: weeks = 8
+      L3683 main()    --predict: weeks = 8
+
+    Each silently short-circuited the config. user puts
+    {"predict_horizon_weeks": 12} → forge said "last 8 weeks" anyway.
+
+    P11 fix: callers pass weeks=None when --weeks isn't given on CLI,
+    so the function-side cfg lookup runs. Tests below capture the
+    weeks arg via monkeypatch and assert the config flows through.
+    """
+
+    def _setup_repo_with_horizon(self, tmp_path, horizon):
+        """Helper: a minimal git repo + .forge/config.json with the
+        given predict_horizon_weeks override."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "--allow-empty", "-m", "init", "-q"],
+                       cwd=str(repo), check=True, capture_output=True)
+        (repo / forge.FORGE_DIR).mkdir(parents=True)
+        (repo / forge.FORGE_DIR / "config.json").write_text(json.dumps({
+            "predict_horizon_weeks": horizon,
+        }))
+        return repo
+
+    def test_predict_dispatch_passes_none_when_no_cli_weeks(self, tmp_path,
+                                                             monkeypatch):
+        """`forge --predict` with config_horizon=17 must reach
+        predict_defects with the config value (or None — the function's
+        own default-resolution then reads cfg)."""
+        repo = self._setup_repo_with_horizon(tmp_path, 17)
+        captured = {}
+
+        def fake_predict_defects(root_arg, weeks=None):
+            captured["root"] = root_arg
+            captured["weeks_arg"] = weeks
+            # Resolve the same way the real function would
+            cfg = forge._load_forge_config(root_arg)
+            captured["weeks_resolved"] = (weeks if weeks is not None
+                                           else cfg["predict_horizon_weeks"])
+
+        monkeypatch.setattr(forge, "predict_defects", fake_predict_defects)
+        monkeypatch.setattr(forge, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(sys, "argv", ["forge", "--predict"])
+        forge.main()
+
+        # Pre-P11: weeks_arg would be 8 (hardcoded). Post-P11: None,
+        # which means the function's cfg-default kicks in → 17.
+        assert captured["weeks_arg"] is None, (
+            f"--predict should pass weeks=None when --weeks not on CLI, "
+            f"got {captured['weeks_arg']!r}"
+        )
+        assert captured["weeks_resolved"] == 17, (
+            f"config override must reach predict_defects, got "
+            f"{captured['weeks_resolved']}"
+        )
+
+    def test_carmack_dispatch_passes_none_when_no_cli_weeks(self, tmp_path,
+                                                             monkeypatch):
+        """Same contract for --carmack."""
+        repo = self._setup_repo_with_horizon(tmp_path, 23)
+        captured = {}
+
+        def fake_predict_carmack(root_arg, weeks=None):
+            captured["weeks_arg"] = weeks
+            cfg = forge._load_forge_config(root_arg)
+            captured["weeks_resolved"] = (weeks if weeks is not None
+                                           else cfg["predict_horizon_weeks"])
+
+        monkeypatch.setattr(forge, "predict_carmack", fake_predict_carmack)
+        monkeypatch.setattr(forge, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(sys, "argv", ["forge", "--carmack"])
+        forge.main()
+        assert captured["weeks_arg"] is None
+        assert captured["weeks_resolved"] == 23
+
+    def test_anomaly_dispatch_passes_none_when_no_cli_weeks(self, tmp_path,
+                                                             monkeypatch):
+        """Same contract for --anomaly."""
+        repo = self._setup_repo_with_horizon(tmp_path, 31)
+        captured = {}
+
+        def fake_anomaly_detect(root_arg, weeks=None):
+            captured["weeks_arg"] = weeks
+
+        monkeypatch.setattr(forge, "anomaly_detect", fake_anomaly_detect)
+        monkeypatch.setattr(forge, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(sys, "argv", ["forge", "--anomaly"])
+        forge.main()
+        assert captured["weeks_arg"] is None
+
+    def test_cli_weeks_still_overrides_config(self, tmp_path, monkeypatch):
+        """When the user DOES pass --weeks N, that wins over config.
+        Regression guard: P11's None-default refactor must not have
+        broken the CLI-takes-precedence behavior."""
+        repo = self._setup_repo_with_horizon(tmp_path, 17)  # config = 17
+        captured = {}
+
+        def fake_predict_defects(root_arg, weeks=None):
+            captured["weeks_arg"] = weeks
+
+        monkeypatch.setattr(forge, "predict_defects", fake_predict_defects)
+        monkeypatch.setattr(forge, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(sys, "argv", ["forge", "--predict", "--weeks", "5"])
+        forge.main()
+        # CLI 5 must beat config 17 (and beat any future cfg default)
+        assert captured["weeks_arg"] == 5
+
+    def test_full_cycle_passes_none_to_all_three_subcalls(self, tmp_path,
+                                                          monkeypatch):
+        """full_cycle calls predict_defects + predict_carmack + anomaly_detect.
+        All three must pass weeks=None so each reads its own cfg lookup.
+        Pre-P11: full_cycle hardcoded weeks=8 on all three sites."""
+        repo = self._setup_repo_with_horizon(tmp_path, 41)
+        captured = {"predict": None, "carmack": None, "anomaly": None}
+
+        def fake_predict_defects(root_arg, weeks=None):
+            captured["predict"] = weeks
+        def fake_predict_carmack(root_arg, weeks=None):
+            captured["carmack"] = weeks
+        def fake_anomaly_detect(root_arg, weeks=None):
+            captured["anomaly"] = weeks
+
+        monkeypatch.setattr(forge, "predict_defects", fake_predict_defects)
+        monkeypatch.setattr(forge, "predict_carmack", fake_predict_carmack)
+        monkeypatch.setattr(forge, "anomaly_detect", fake_anomaly_detect)
+        # Stub the heavier full_cycle steps so we don't actually run pytest
+        monkeypatch.setattr(forge, "get_changed_files", lambda *a, **kw: set())
+        monkeypatch.setattr(forge, "run_tests", lambda *a, **kw:
+                            {"total": 1, "passed": 1, "failed": 0, "errors": 0,
+                             "skipped": 0, "details": [], "duration": 0.1,
+                             "passed_tests": ["t::a"], "failed_tests": [],
+                             "xfailed_tests": [], "xpassed_tests": []})
+        monkeypatch.setattr(forge, "log_run", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "save_json", lambda *a, **kw: None)
+
+        forge.full_cycle(repo)
+
+        assert captured["predict"] is None, (
+            f"full_cycle predict_defects should receive weeks=None, "
+            f"got {captured['predict']!r}"
+        )
+        assert captured["carmack"] is None
+        assert captured["anomaly"] is None
+
+    def test_validator_rejects_empty_value_after_equals(self):
+        """`forge --mutate=` (= with nothing after) used to pass the
+        validator and run mutation on forge.py itself (1448 mutants).
+        P11 catches the empty string explicitly."""
+        # _expand_equals_args produces ["--mutate", ""]
+        expanded = forge._expand_equals_args(["--mutate="])
+        assert expanded == ["--mutate", ""]
+
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(expanded)
+        assert exc.value.code == 2
+
+    def test_validator_empty_value_message_mentions_equals(self, capsys):
+        """The error message for `--mutate=` must explicitly mention
+        the empty-after-`=` case so the user understands what happened."""
+        expanded = forge._expand_equals_args(["--bisect="])
+        with pytest.raises(SystemExit):
+            forge._validate_args(expanded)
+        out = capsys.readouterr().out
+        assert "empty string" in out.lower() or "after `=`" in out
+        assert "--bisect requires" in out
+
+    def test_validator_rejects_all_value_flags_with_empty_equals(self):
+        """Sweep: every flag in _REQUIRES_VALUE must reject the
+        `--flag=` (empty) form."""
+        for flag in forge._REQUIRES_VALUE:
+            expanded = forge._expand_equals_args([f"{flag}="])
+            with pytest.raises(SystemExit) as exc:
+                forge._validate_args(expanded)
+            assert exc.value.code == 2, f"{flag}= should exit 2"
+
+
 class TestCycle4P10ObservabilityAndTimeouts:
     """Cycle 4 P10: 3 leftover threads.
 

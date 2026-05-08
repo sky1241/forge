@@ -3327,12 +3327,17 @@ def full_cycle(root):
     print(f"{bar}\n")
 
     # --- STEP 1: PREDICT — quels fichiers vont casser? ---
+    # Pass weeks=None so the called function honors
+    # cfg["predict_horizon_weeks"] (P11 fix: pre-P11 these were
+    # hardcoded `weeks=8` which short-circuited the config). The signature
+    # default of predict_defects/predict_carmack/anomaly_detect already
+    # reads cfg when weeks is None, so this is a 1-line caller fix.
     print("  [1/8] PREDICT — scanning git history for risky files...")
-    predict_defects(root, weeks=8)
+    predict_defects(root, weeks=None)
 
     # --- STEP 1b: CARMACK PREDICT — cross-domain enhanced prediction ---
     print("  [1b/8] CARMACK PREDICT — Kalman + Wavelet + Kaplan-Meier + Modularity...")
-    predict_carmack(root, weeks=8)
+    predict_carmack(root, weeks=None)
 
     # --- STEP 2: MUTATE — les tests couvrent-ils les mutations? ---
     # Only mutate small files changed recently (skip big files to stay fast)
@@ -3389,8 +3394,9 @@ def full_cycle(root):
         print(f"  [6/8] LOCATE — no failures, skipping.")
 
     # --- STEP 7: ANOMALY DETECTION — z-score outliers ---
+    # weeks=None → anomaly_detect honors cfg["predict_horizon_weeks"].
     print(f"  [7/8] ANOMALY — scanning for statistical outliers...")
-    anomaly_detect(root, weeks=8)
+    anomaly_detect(root, weeks=None)
 
     # --- STEP 8: CARMACK SUMMARY ---
     print(f"  [8/8] CARMACK MOVES ACTIVE: Kalman, Wavelet, Kaplan-Meier, Newman, Hamming, DTW")
@@ -3560,14 +3566,20 @@ def _validate_args(args):
             print(f"  Run `forge --help` for the full list.")
             sys.exit(2)
         if a in _REQUIRES_VALUE:
-            # The next arg must be present AND must not be another flag.
-            # Both pre-P4 silent bugs (forge --mutate, forge --weeks)
-            # come from this case being unchecked.
+            # The next arg must be present, non-empty, AND must not be
+            # another flag. Pre-P11 the empty-string case (`--mutate=` →
+            # _expand_equals_args yields `["--mutate", ""]`) slipped
+            # through because `"".startswith("-")` is False and `"" is None`
+            # is False. Result: forge --mutate= ran mutation on forge.py
+            # itself (1448 mutants ≈ 24h). P11 catches the empty string
+            # explicitly with a clear error message.
             nxt = args[i + 1] if i + 1 < len(args) else None
-            if nxt is None or nxt.startswith("-"):
+            if nxt is None or nxt == "" or nxt.startswith("-"):
                 desc = _VALUE_DESCRIPTION.get(a, "a value")
                 print(f"  ERROR: {a} requires {desc}.")
-                if nxt is not None:
+                if nxt == "":
+                    print(f"  Got empty string (likely from `--{a.lstrip('-')}=` with nothing after `=`).")
+                elif nxt is not None:
                     print(f"  Got next arg: {nxt!r}")
                 sys.exit(2)
             if a in _NUMERIC_VALUE_FLAGS:
@@ -3606,18 +3618,26 @@ def main():
         return
 
     if "--carmack" in args:
-        weeks = 8
+        # P11 fix: when --weeks is absent, pass None so predict_carmack
+        # honors cfg["predict_horizon_weeks"] from .forge/config.json.
+        # Pre-P11 we hardcoded `weeks = 8` here, which silently
+        # short-circuited any user config override.
+        weeks = None
         if "--weeks" in args:
             wi = args.index("--weeks")
-            weeks = int(args[wi + 1]) if wi + 1 < len(args) and args[wi + 1].isdigit() else 8
+            if wi + 1 < len(args) and args[wi + 1].isdigit():
+                weeks = int(args[wi + 1])
         predict_carmack(root, weeks)
         return
 
     if "--anomaly" in args:
-        weeks = 8
+        # P11 fix: same pattern as --carmack above. weeks=None lets
+        # anomaly_detect read cfg.
+        weeks = None
         if "--weeks" in args:
             wi = args.index("--weeks")
-            weeks = int(args[wi + 1]) if wi + 1 < len(args) and args[wi + 1].isdigit() else 8
+            if wi + 1 < len(args) and args[wi + 1].isdigit():
+                weeks = int(args[wi + 1])
         anomaly_detect(root, weeks)
         return
 
@@ -3680,10 +3700,13 @@ def main():
         return
 
     if "--predict" in args:
-        weeks = 8
+        # P11 fix: same pattern as --carmack/--anomaly. weeks=None lets
+        # predict_defects read cfg["predict_horizon_weeks"].
+        weeks = None
         if "--weeks" in args:
             wi = args.index("--weeks")
-            weeks = int(args[wi + 1]) if wi + 1 < len(args) and args[wi + 1].isdigit() else 8
+            if wi + 1 < len(args) and args[wi + 1].isdigit():
+                weeks = int(args[wi + 1])
         predict_defects(root, weeks)
         return
 
