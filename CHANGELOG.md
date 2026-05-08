@@ -6,6 +6,22 @@ All notable changes to forge are documented here. Format follows
 
 ## [Unreleased]
 
+### Added — Cycle 4 E-2 (2026-05-08)
+- **Granular install extras** in `pyproject.toml`:
+  - `forge-shield[mutate]` → libcst (`forge --mutate`, AST-aware backend)
+  - `forge-shield[locate]` → coverage + pytest-cov (`forge --locate`, Ochiai SBFL)
+  - `forge-shield[fuzz]` → hypothesis (`forge --gen-props`; the user runs the
+    generated tests, hypothesis is needed to execute them)
+  - `forge-shield[all]` → meta-extra rolling up `[mutate,locate,fuzz]`
+  - `forge-shield[dev]` → contributor extra (rolls in `[all]` plus pytest,
+    pytest-timeout, mypy, mutmut)
+- **Default `pip install forge-shield`** now ships only stdlib + the user's
+  own pytest. Each subcommand that needs a native lib lives behind its own
+  extra; users opt in to what they actually run.
+- Fail-fast clean errors when an extra is missing (cohérent across the
+  matrix): `forge --mutate` without `[mutate]` and `forge --locate` without
+  `[locate]` print an install hint and exit cleanly instead of stack-tracing.
+
 ### BREAKING — Cycle 4 D-3b (2026-05-08)
 - **Mutation backend is now libcst (AST-aware) only.** The regex
   backend was removed after D-3b runtime validation showed 23.4%

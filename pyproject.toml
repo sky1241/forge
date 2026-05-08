@@ -34,21 +34,40 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-# `forge --mutate` requires libcst (AST-aware mutation backend, cycle 4 D-3b).
-# All other forge subcommands work without it — keep the install footprint
-# minimal for users who only need --baseline / --predict / --carmack / etc.
+# Granular install footprint (cycle 4 E-2). Default `pip install forge-shield`
+# ships only stdlib + the user's own pytest. Each subcommand that needs a
+# native lib lives behind its own extra; users opt in to what they actually
+# run. The `all` meta-extra rolls them up.
+#
+#   forge --mutate           → forge-shield[mutate]    (libcst)
+#   forge --locate           → forge-shield[locate]    (coverage + pytest-cov)
+#   forge --gen-props        → forge-shield[fuzz]      (hypothesis; user runs
+#                                                       the generated tests)
+#   everything               → forge-shield[all]       (= mutate+locate+fuzz)
+#   contributor / dev        → forge-shield[dev]
+#
+# `forge --mutate` and `forge --locate` fail-fast with a clean install message
+# when their extra is absent (see _check_dep helper + cycle 4 D-3b removal).
+
 mutate = [
     "libcst>=1.0",
+]
+locate = [
+    "coverage>=7.0",
+    "pytest-cov>=4.0",
+]
+fuzz = [
+    "hypothesis>=6.0",
+]
+all = [
+    "forge-shield[mutate,locate,fuzz]",
 ]
 dev = [
     "pytest>=7.0",
     "pytest-timeout>=2.0",
-    "pytest-cov>=4.0",
-    "coverage>=7.0",
-    "hypothesis>=6.0",
-    "mutmut>=2.4",
     "mypy>=1.0",
-    "libcst>=1.0",
+    "mutmut>=2.4",
+    "forge-shield[mutate,locate,fuzz]",
 ]
 
 [project.scripts]
