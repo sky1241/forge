@@ -1406,16 +1406,17 @@ class TestCycle3MutateWriteInsideTry:
     is inside the try."""
 
     def test_mutate_loop_writes_inside_try(self):
+        # NOTE: this is the cycle 3 chunk 2 grep-on-source test. P3 of
+        # cycle 4 replaces it with a real behavior test (extract
+        # _try_one_mutant + monkeypatch write_text). Until P3 lands the
+        # window size is bumped from 4000 to 6000 chars so the cfg-loading
+        # preamble added by cycle 4 P1 (run_mutation now reads a config)
+        # doesn't push the `finally:` out of range.
         src = (Path(forge.__file__) if hasattr(forge, "__file__") and forge.__file__
                else Path(__file__).parent.parent / "forge.py").read_text()
-        # Find run_mutation
         idx = src.find("def run_mutation(")
         assert idx > 0
-        body = src[idx:idx + 4000]
-        # Must NOT have the pattern "src.write_text(mut_source...)\n  try:"
-        # (write before try). Must have write inside the try. Easiest check:
-        # the line "src.write_text(mut_source" must follow "try:" before the
-        # next "finally:".
+        body = src[idx:idx + 6000]
         try_pos = body.find("try:", body.find("for line_no"))
         finally_pos = body.find("finally:", try_pos)
         assert try_pos > 0 and finally_pos > try_pos
@@ -1963,6 +1964,46 @@ class TestCycle3ForgeConfig:
         assert len(forge.FORGE_CONFIG_DEFAULTS) >= 15, (
             f"only {len(forge.FORGE_CONFIG_DEFAULTS)} keys — should be >= 15. "
             f"Did a key get dropped?"
+        )
+
+    def test_every_cfg_key_wired_or_explicit_optout(self):
+        """Cycle 4 P1 lock: every key in FORGE_CONFIG_DEFAULTS must be
+        actually consumed by forge.py via `cfg["<key>"]` or `cfg.get("<key>"`,
+        so a future declaration without runtime use can't sneak through.
+
+        The chunk-6 commit shipped 21 keys but 10 were orphaned (declared but
+        never read) — `mutation_threshold_pct`, `ochiai_top_n`,
+        `bisect_iteration_timeout_seconds`, etc. Cycle 4 P1 wired them all.
+        This test prevents the same silent-claim regression in the future.
+
+        If a key is intentionally declarative-only (rare, needs justification),
+        add it to `_OPT_OUT_KEYS` below with an inline comment explaining
+        why it's wired through some other path.
+        """
+        src = Path(forge.__file__).read_text(encoding="utf-8")
+        # Whitelist of keys allowed to exist without a direct cfg["X"] read.
+        # Each entry MUST have a comment explaining why (e.g. consumed via
+        # **cfg expansion, or read by a function that accepts it as kwarg).
+        _OPT_OUT_KEYS = {
+            # (intentionally empty — every cycle 4 key is wired directly)
+        }
+        unwired = []
+        for key in forge.FORGE_CONFIG_DEFAULTS:
+            if key in _OPT_OUT_KEYS:
+                continue
+            # Match cfg["key"], cfg.get("key", ...), cfg.get('key', ...)
+            patterns = [
+                f'cfg["{key}"]',
+                f"cfg['{key}']",
+                f'cfg.get("{key}"',
+                f"cfg.get('{key}'",
+            ]
+            if not any(p in src for p in patterns):
+                unwired.append(key)
+        assert not unwired, (
+            f"FORGE_CONFIG_DEFAULTS keys declared but never consumed in "
+            f"forge.py: {unwired}. Either wire them via cfg[...] / cfg.get(...) "
+            f"or add to _OPT_OUT_KEYS with a justification comment."
         )
 
 

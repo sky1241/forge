@@ -194,21 +194,35 @@ def _scalar_kalman(observations, Q=None, R=None):
     return estimates
 
 
-def _adaptive_kalman(observations, n_iter=10):
+def _adaptive_kalman(observations, n_iter=10, Q_init=None, R_init=None):
     """Kalman filter with Q,R estimated from data via EM-style iteration.
     Useful when default Q,R don't match the true noise structure of the signal.
 
+    Q_init/R_init: optional initial guesses (e.g. from .forge/config.json
+    carmack_kalman_q / carmack_kalman_r). When None, fall back to
+    sample-variance init from the data. The EM loop will move from there;
+    a strong init biases convergence on short series where data alone is
+    too noisy.
+
     Returns (estimates, Q_hat, R_hat).
     """
+    Q_default = Q_init if Q_init is not None else CARMACK_KALMAN_Q
+    R_default = R_init if R_init is not None else CARMACK_KALMAN_R
     if not observations or len(observations) < 3:
-        return _scalar_kalman(observations), CARMACK_KALMAN_Q, CARMACK_KALMAN_R
+        return _scalar_kalman(observations, Q=Q_default, R=R_default), Q_default, R_default
     obs = list(observations)
     n = len(obs)
-    # Initialize Q,R from sample variance of first differences and residuals
-    diffs = [obs[i + 1] - obs[i] for i in range(n - 1)]
-    mean_d = sum(diffs) / len(diffs)
-    Q = max(sum((d - mean_d) ** 2 for d in diffs) / max(len(diffs), 1), 1e-6)
-    R = max(Q, 1e-6)
+    # Initial guess: explicit override > sample variance from data
+    if Q_init is not None:
+        Q = max(float(Q_init), 1e-6)
+    else:
+        diffs = [obs[i + 1] - obs[i] for i in range(n - 1)]
+        mean_d = sum(diffs) / len(diffs)
+        Q = max(sum((d - mean_d) ** 2 for d in diffs) / max(len(diffs), 1), 1e-6)
+    if R_init is not None:
+        R = max(float(R_init), 1e-6)
+    else:
+        R = max(Q, 1e-6)
 
     for _ in range(n_iter):
         # Forward pass
@@ -1118,8 +1132,9 @@ def log_run(root, results):
 def detect_flaky(root, runs=None):
     """Run tests N times, find tests that flip between pass/fail.
     Flaky tests are the #1 trust killer in CI — Luo et al. 2014."""
+    cfg = _load_forge_config(root)
     if runs is None:
-        runs = _load_forge_config(root)["flaky_runs"]
+        runs = cfg["flaky_runs"]
     print(f"  Running tests {runs} times to detect flaky tests...")
     all_failures = []
     for i in range(runs):
@@ -1243,6 +1258,8 @@ def show_heatmap(root):
 def bisect_test(root, test_name):
     """Auto git-bisect to find which commit broke a specific test.
     Zeller 1999 — Delta Debugging + binary search on commits."""
+    cfg = _load_forge_config(root)
+    iter_timeout = cfg["bisect_iteration_timeout_seconds"]
     # Verify test exists and currently fails. Combine FORGE_TEST_FILTER (if
     # any) with the user-provided test_name via AND, so a noisy target repo
     # with pre-existing failures stays narrowed to the slice the user picked.
@@ -1253,10 +1270,10 @@ def bisect_test(root, test_name):
     try:
         result = subprocess.run(cmd_test, capture_output=True, text=True,
                                 cwd=str(root), encoding="utf-8", errors="replace",
-                                timeout=120)
+                                timeout=iter_timeout)
     except subprocess.TimeoutExpired:
-        print(f"  Verify step exceeded 120s. Set FORGE_TEST_FILTER to narrow "
-              f"the slice or run pytest manually first.")
+        print(f"  Verify step exceeded {iter_timeout}s. Set FORGE_TEST_FILTER to "
+              f"narrow the slice or run pytest manually first.")
         return
     if "failed" not in result.stdout.lower() and "error" not in result.stdout.lower():
         print(f"  {test_name} is not currently failing. Nothing to bisect.")
@@ -1322,7 +1339,7 @@ def bisect_test(root, test_name):
 
             r = subprocess.run(cmd_test, capture_output=True, text=True,
                               cwd=str(root), encoding="utf-8", errors="replace",
-                              timeout=120)
+                              timeout=iter_timeout)
             is_bad = "failed" in r.stdout.lower() or "error" in r.stdout.lower()
             print("FAIL" if is_bad else "PASS")
 
@@ -1414,6 +1431,8 @@ def find_impacted_tests(root, changed_files):
 
 def run_fast(root, verbose=False):
     """Run only tests impacted by recent changes."""
+    cfg = _load_forge_config(root)
+    impacted_timeout = cfg["impacted_tests_timeout_seconds"]
     changed = get_changed_files(root)
     if not changed:
         print("  No changes detected since last commit. Nothing to test.")
@@ -1445,11 +1464,11 @@ def run_fast(root, verbose=False):
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
-                               cwd=str(root), timeout=300,
+                               cwd=str(root), timeout=impacted_timeout,
                                encoding="utf-8", errors="replace")
         output = result.stdout + result.stderr
     except subprocess.TimeoutExpired:
-        print("  TIMEOUT after 5min")
+        print(f"  TIMEOUT after {impacted_timeout}s")
         return
 
     duration = time.time() - start
@@ -1472,6 +1491,8 @@ def run_fast(root, verbose=False):
 def snapshot_capture(root, cmd_str):
     """Capture command output as a golden file for regression detection.
     Golden master testing — Feathers 2004, Working Effectively with Legacy Code."""
+    cfg = _load_forge_config(root)
+    cmd_timeout = cfg["snapshot_command_timeout_seconds"]
     snap_dir = root / SNAPSHOT_DIR
     os.makedirs(str(snap_dir), exist_ok=True)
 
@@ -1484,11 +1505,11 @@ def snapshot_capture(root, cmd_str):
     try:
         import shlex
         result = subprocess.run(shlex.split(cmd_str), shell=False, capture_output=True,
-                               text=True, cwd=str(root), timeout=60,
+                               text=True, cwd=str(root), timeout=cmd_timeout,
                                encoding="utf-8", errors="replace")
         output = result.stdout
     except subprocess.TimeoutExpired:
-        print("  Command timed out (60s)")
+        print(f"  Command timed out ({cmd_timeout}s)")
         return
 
     snap_path.write_text(output, encoding="utf-8")
@@ -1503,6 +1524,8 @@ def snapshot_capture(root, cmd_str):
 
 def snapshot_check(root):
     """Compare all golden files against current output."""
+    cfg = _load_forge_config(root)
+    cmd_timeout = cfg["snapshot_command_timeout_seconds"]
     snap_dir = root / SNAPSHOT_DIR
     if not snap_dir.exists():
         print("  No snapshots found. Use: forge.py --snapshot \"command\"")
@@ -1537,7 +1560,7 @@ def snapshot_check(root):
             import shlex
             result = subprocess.run(shlex.split(meta["command"]), shell=False,
                                    capture_output=True, text=True,
-                                   cwd=str(root), timeout=60,
+                                   cwd=str(root), timeout=cmd_timeout,
                                    encoding="utf-8", errors="replace")
             actual = result.stdout
         except subprocess.TimeoutExpired:
@@ -1798,6 +1821,8 @@ def _test_with_input(root, test_name, input_content, input_ext):
 def minimize_input(root, test_name, input_file):
     """Delta debugging: find minimal input that still fails the test.
     Zeller & Hildebrandt 2002, IEEE TSE Vol.28 No.2."""
+    cfg = _load_forge_config(root)
+    max_iter = cfg["minimize_max_iter"]
     input_path = Path(input_file)
     if not input_path.is_absolute():
         input_path = root / input_path
@@ -1823,7 +1848,7 @@ def minimize_input(root, test_name, input_file):
     print(f"  Running ddmin on {original_count} elements...")
     n = 2
     iteration = 0
-    while len(chunks) > 1 and iteration < MINIMIZE_MAX_ITER:
+    while len(chunks) > 1 and iteration < max_iter:
         iteration += 1
         chunk_size = max(1, len(chunks) // n)
         subsets = [chunks[i:i + chunk_size] for i in range(0, len(chunks), chunk_size)]
@@ -2324,7 +2349,7 @@ def _generate_mutants(source_path):
                     yield (i + 1, op_name, line.strip(), mutated_line.strip(), mutated_source)
 
 
-def run_mutation(root, target_file=None):
+def run_mutation(root, target_file=None, cfg=None):
     """Pure-Python mutation testing. No external deps. Offutt 1996: 5 operators suffice.
     Mutation score = killed / total. Target: >80%."""
     # Find target files
@@ -2350,19 +2375,29 @@ def run_mutation(root, target_file=None):
         return
 
     test_paths = [str(f) for f in test_files]
-    # Per-mutant timeout. Default: derive from baseline run duration so that a
-    # repo with a 3-min test suite doesn't see EVERY mutant timeout in 30s.
-    # Override via env var FORGE_MUTATE_TIMEOUT=N (seconds).
+    if cfg is None:
+        cfg = _load_forge_config(root)
+    threshold_pct = cfg["mutation_threshold_pct"]
+    # Per-mutant timeout precedence: FORGE_MUTATE_TIMEOUT env var > config
+    # `mutation_per_target_timeout_seconds` (if set) > derive from baseline
+    # duration. The env var preserves the legacy escape hatch users have
+    # already documented in their CI scripts; the cfg key gives the same
+    # control via `.forge/config.json` for repos that prefer file-based
+    # tuning. Both override the auto-derive heuristic.
     mutate_timeout_env = os.environ.get("FORGE_MUTATE_TIMEOUT")
+    cfg_timeout = cfg.get("mutation_per_target_timeout_seconds")
     if mutate_timeout_env and mutate_timeout_env.isdigit():
         mutant_timeout = int(mutate_timeout_env)
+    elif isinstance(cfg_timeout, int) and cfg_timeout > 0:
+        mutant_timeout = cfg_timeout
     else:
         baseline = load_json(str(root / BASELINE_FILE))
         baseline_dur = float(baseline.get("duration", 0)) if baseline else 0
         # 2x baseline + 10s safety margin, clamped [60, 600]
         mutant_timeout = max(60, min(600, int(baseline_dur * 2) + 10))
     print(f"  per-mutant timeout: {mutant_timeout}s "
-          f"(set FORGE_MUTATE_TIMEOUT=N to override)")
+          f"(set FORGE_MUTATE_TIMEOUT=N or .forge/config.json "
+          f"mutation_per_target_timeout_seconds to override)")
 
     killed = 0
     survived = 0
@@ -2420,13 +2455,13 @@ def run_mutation(root, target_file=None):
 
     bar = "=" * 50
     print(f"\n{bar}")
-    print(f"  MUTATION TESTING — {'PASS' if score >= MUTATION_THRESHOLD else 'FAIL'}")
+    print(f"  MUTATION TESTING — {'PASS' if score >= threshold_pct else 'FAIL'}")
     print(f"{bar}")
     print(f"  Total mutants:  {total}")
     print(f"  Killed:         {killed}")
     print(f"  Survived:       {survived}")
     print(f"  Timeouts:       {timeout_count}  (counted as killed)")
-    print(f"  Score:          {score:.0f}% (threshold: {MUTATION_THRESHOLD}%)")
+    print(f"  Score:          {score:.0f}% (threshold: {threshold_pct}%)")
     # Warning when timeouts dominate — signals that the timeout calibration
     # is too tight, OR the test suite genuinely doesn't exercise the file.
     if total > 0 and timeout_count / total > 0.2:
@@ -2451,6 +2486,8 @@ def fault_locate(root):
     """Locate suspicious lines using Ochiai SBFL formula.
     suspiciousness(s) = failed(s) / sqrt(total_failed * (failed(s) + passed(s)))
     Uses coverage.data.CoverageData for per-test context (10x faster than per-test runs)."""
+    cfg = _load_forge_config(root)
+    top_n = cfg["ochiai_top_n"]
     cov_mod = _check_dep("coverage")
     if not cov_mod:
         return
@@ -2599,7 +2636,7 @@ def fault_locate(root):
     print(f"  FAULT LOCALIZATION — Ochiai SBFL")
     print(f"  {total_failed} failing test(s), {len(passed_tests)} passing")
     print(f"{bar}")
-    for s in suspects[:OCHIAI_TOP_N]:
+    for s in suspects[:top_n]:
         label = "highly suspect" if s["score"] > 0.7 else "suspect" if s["score"] > 0.4 else "low"
         # Try to show the actual source line
         src_line = ""
@@ -2718,7 +2755,11 @@ def predict_carmack(root, weeks=None):
                         wk = min(int((t - baseline_ts) / (7 * 86400)), n_weeks - 1)
                         if wk >= 0:
                             bins[wk] += 1.0
-                    smoothed, _q_hat, _r_hat = _adaptive_kalman(bins)
+                    smoothed, _q_hat, _r_hat = _adaptive_kalman(
+                        bins,
+                        Q_init=cfg["carmack_kalman_q"],
+                        R_init=cfg["carmack_kalman_r"],
+                    )
                     if smoothed:
                         kalman_risk = smoothed[-1]
             except (ValueError, TypeError):
@@ -2920,8 +2961,10 @@ def anomaly_detect(root, weeks=None):
 def flaky_dtw(root, runs=None):
     """Enhanced flaky detection with DTW temporal pattern matching.
     Tests with similar pass/fail sequences = likely same root cause."""
+    cfg = _load_forge_config(root)
     if runs is None:
-        runs = _load_forge_config(root)["flaky_dtw_runs"]
+        runs = cfg["flaky_dtw_runs"]
+    dtw_threshold = cfg["carmack_dtw_threshold"]
     test_sequences = {}
 
     for run_num in range(runs):
@@ -2950,7 +2993,7 @@ def flaky_dtw(root, runs=None):
     for i in range(len(test_names)):
         for j in range(i + 1, len(test_names)):
             dist = _dtw_distance(flaky_tests[test_names[i]], flaky_tests[test_names[j]])
-            if dist < CARMACK_DTW_THRESHOLD:
+            if dist < dtw_threshold:
                 clusters.append((test_names[i], test_names[j], dist))
 
     bar = "=" * 60
@@ -2968,7 +3011,7 @@ def flaky_dtw(root, runs=None):
                 print(f"    Category: {cat} — {fix}")
 
     if clusters:
-        print(f"\n  SHARED ROOT CAUSE (DTW distance < {CARMACK_DTW_THRESHOLD}):")
+        print(f"\n  SHARED ROOT CAUSE (DTW distance < {dtw_threshold}):")
         for a, b, dist in clusters:
             print(f"    {a}")
             print(f"    {b}")
@@ -3291,8 +3334,9 @@ def main():
     if "--mutate" in args:
         idx = args.index("--mutate")
         target = args[idx + 1] if idx + 1 < len(args) and not args[idx + 1].startswith("-") else None
-        score = run_mutation(root, target)
-        if score is not None and score < MUTATION_THRESHOLD:
+        cfg = _load_forge_config(root)
+        score = run_mutation(root, target, cfg=cfg)
+        if score is not None and score < cfg["mutation_threshold_pct"]:
             sys.exit(1)
         return
 
