@@ -8,6 +8,53 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.0.3] - 2026-05-08
+
+Patch release that brings the suite green on the full
+GitHub Actions matrix (3 OS × 3 Python = 9 jobs). The v1.0.2 claim
+"PyPI publishable" was true on Linux; v1.0.3 makes it true on
+Windows and macOS as well. Three Phase J commits caught by the
+first live CI runs (`acd5c69` workflow + 3 follow-up patches).
+
+### Fixed
+- **Cross-platform path comparisons in `find_tests`** — pre-1.0.3
+  `find_tests` built `excludes` with `os.sep` but compared with
+  `str(t)`. On Windows, `Path.glob` can return paths whose `str()`
+  uses forward slashes (depending on construction); the substring
+  match silently failed and `norecursedirs` exclusions were ignored.
+  Now both sides use forward-slash via `Path.as_posix()` and
+  literal `"/dir/"` excludes. Linux/macOS unchanged. (cycle 4 J-2,
+  B13 forge.py side)
+- **Test assertions normalize paths via `as_posix()`** — 8 sites in
+  `tests/test_forge_real_algos.py` did
+  `"foo/bar.py" in str(f)` which broke on Windows for the same
+  reason. Replaced with `f.as_posix()` so the comparison string is
+  always forward-slash, regardless of platform. (cycle 4 J-1, B13
+  test side)
+- **`git commit` calls now set `user.email`/`user.name`** — two raw
+  test sites (`test_bisect_verify_step_has_timeout`, 
+  `test_bisect_test_handles_git_log_failure`) did
+  `git init` + `git commit --allow-empty` without configuring git
+  user. On a fresh CI runner without `~/.gitconfig`, that exits 128
+  ("Author identity unknown"). Linux + Windows runners affected;
+  macOS runners ship a default config. Now both sites either call
+  the existing `_git_init` helper or invoke `git config` inline.
+  (cycle 4 J-1, B14)
+- **`fcntl` import is now `sys.platform`-narrowed** — pre-1.0.3
+  `log_run` used `try: import fcntl except ImportError` for the
+  Windows fallback. The runtime worked, but mypy strict on Windows
+  surfaced 4 attr-defined errors because the typeshed Windows stub
+  resolves the module name without exposing POSIX-only `flock`,
+  `LOCK_EX`, `LOCK_UN`. The `if sys.platform != "win32":` form lets
+  mypy treat the fcntl branch as dead code on Windows; zero
+  `# type: ignore` added. (cycle 4 J-3, B15)
+
+### Internal
+- **GitHub Actions CI live across 9 jobs** (Linux/macOS/Windows ×
+  Python 3.11/3.12/3.13). Workflow at `.github/workflows/test.yml`,
+  badge in README is dynamic. Initial runs caught B13/B14/B15
+  before they reached PyPI. (cycle 4 G-1 / acd5c69)
+
 ## [1.0.2] - 2026-05-08
 
 Patch release that fixes a cross-version mypy strict regression
@@ -228,7 +275,8 @@ mypy `--strict` passes the entire codebase.
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/sky1241/forge/releases/tag/v1.0.3
 [1.0.2]: https://github.com/sky1241/forge/releases/tag/v1.0.2
 [1.0.1]: https://github.com/sky1241/forge/releases/tag/v1.0.1
 [1.0.0]: https://github.com/sky1241/forge/releases/tag/v1.0.0
