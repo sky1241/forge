@@ -1766,6 +1766,131 @@ class TestCycle3CloseBugAcceptsDigitId:
 # ============================================================================
 
 
+class TestCycle4D3aLibcstBackend:
+    """Cycle 4 D-3a: libcst (AST-aware) mutation backend with regex
+    fallback. Pre-cycle-4 D-3 prescan measured the regex backend at
+    8.8% invalid mutants (256/2894) — mostly `->` arrow muté en `+>`
+    and similar AST-blind regex faux positifs (see
+    docs/D3_LIBCST_PRESCAN.md). The libcst backend operates on the
+    parsed AST so every mutant is syntactically valid by construction.
+
+    Tests below pin:
+      - libcst is the default backend when importable
+      - regex is the fallback when libcst is missing
+      - FORGE_MUTATION_BACKEND env var overrides the default
+      - libcst mutants parse back cleanly (the contract)
+    """
+
+    def test_libcst_backend_used_when_available(self, tmp_path, capsys, monkeypatch):
+        """Default backend (FORGE_MUTATION_BACKEND unset) prefers libcst
+        when importable. Stdout says so. Skip clean if libcst isn't in
+        the test runner's venv (CI minimal jobs)."""
+        pytest.importorskip("libcst")
+        monkeypatch.delenv("FORGE_MUTATION_BACKEND", raising=False)
+        src = tmp_path / "x.py"
+        src.write_text("def f(a, b):\n    return a + b\n")
+        list(forge._generate_mutants(src))
+        out = capsys.readouterr().out
+        assert "mutation backend: libcst" in out
+
+    def test_regex_fallback_when_libcst_missing(self, tmp_path, capsys, monkeypatch):
+        """When libcst can't be imported, the backend falls back to regex
+        with an explicit notice. Pin the import-time fallback path."""
+        monkeypatch.delenv("FORGE_MUTATION_BACKEND", raising=False)
+        # Hide libcst from import — works whether the venv has it or not
+        monkeypatch.setitem(sys.modules, "libcst", None)
+        src = tmp_path / "x.py"
+        src.write_text("def f(a, b):\n    return a + b\n")
+        list(forge._generate_mutants(src))
+        out = capsys.readouterr().out
+        assert "mutation backend: regex" in out
+        assert "libcst not installed" in out
+
+    def test_FORGE_MUTATION_BACKEND_regex_forces_regex(self, tmp_path, capsys, monkeypatch):
+        """FORGE_MUTATION_BACKEND=regex bypasses libcst even when installed.
+        This works regardless of libcst availability in the test runner."""
+        monkeypatch.setenv("FORGE_MUTATION_BACKEND", "regex")
+        src = tmp_path / "x.py"
+        src.write_text("def f(a, b):\n    return a + b\n")
+        list(forge._generate_mutants(src))
+        out = capsys.readouterr().out
+        assert "mutation backend: regex" in out
+        assert "FORGE_MUTATION_BACKEND=regex override" in out
+
+    def test_FORGE_MUTATION_BACKEND_libcst_required_raises(self, tmp_path, monkeypatch):
+        """FORGE_MUTATION_BACKEND=libcst with no libcst installed raises
+        a clear RuntimeError instead of silently falling back."""
+        monkeypatch.setenv("FORGE_MUTATION_BACKEND", "libcst")
+        monkeypatch.setitem(sys.modules, "libcst", None)
+        src = tmp_path / "x.py"
+        src.write_text("def f(): return 1\n")
+        with pytest.raises(RuntimeError, match="libcst"):
+            list(forge._generate_mutants(src))
+
+    def test_FORGE_MUTATION_BACKEND_unknown_warns_and_falls_back(
+        self, tmp_path, capsys, monkeypatch,
+    ):
+        """An unknown backend name prints a warning and falls back to auto."""
+        monkeypatch.setenv("FORGE_MUTATION_BACKEND", "foobar")
+        src = tmp_path / "x.py"
+        src.write_text("def f(): return 1\n")
+        list(forge._generate_mutants(src))
+        out = capsys.readouterr().out
+        assert "WARNING: unknown FORGE_MUTATION_BACKEND" in out
+        assert "foobar" in out
+
+    def test_libcst_mutants_all_parseable(self, tmp_path, monkeypatch):
+        """The contract of the libcst backend: every yielded mutant source
+        is a syntactically valid Python module. Pre-D-3a regex backend
+        produced 8.8% invalids; libcst produces 0% by construction."""
+        pytest.importorskip("libcst")
+        monkeypatch.setenv("FORGE_MUTATION_BACKEND", "libcst")
+        # Sample with all 5 mutation kinds + the known regex-killer:
+        # `def f(a: int) -> int:` — regex would mutate `->` and break.
+        src = tmp_path / "sample.py"
+        src.write_text(
+            "def f(a: int, b: int) -> int:\n"
+            "    if a == 0 and b > 0 or True:\n"
+            "        return a * b + 1\n"
+            "    return a - b\n"
+        )
+        import libcst as cst
+        mutants = list(forge._generate_mutants(src))
+        assert mutants, "expected at least one mutant on this sample"
+        for line, kind, orig, mut, full_src in mutants:
+            try:
+                cst.parse_module(full_src)
+            except cst.ParserSyntaxError as e:
+                raise AssertionError(
+                    f"libcst backend produced an invalid mutant at L{line} {kind} "
+                    f"({orig} -> {mut}):\n{e}\n"
+                    f"--- mutated source ---\n{full_src}"
+                )
+
+    def test_libcst_skips_arrow_annotations(self, tmp_path, monkeypatch):
+        """The dominant regex bug: `def f() -> int:` muté en `+> int:` or
+        `-< int:`. libcst sees the `-> int` as a return-type annotation
+        (not a BinaryOperation) and never produces those mutants."""
+        pytest.importorskip("libcst")
+        monkeypatch.setenv("FORGE_MUTATION_BACKEND", "libcst")
+        src = tmp_path / "annotated.py"
+        # 5 arrow-only definitions; regex backend would yield 10 invalid mutants
+        # (1 AOR + 1 ROR per `->`), libcst yields 0.
+        src.write_text(
+            "def a() -> int: return 1\n"
+            "def b() -> str: return ''\n"
+            "def c() -> bool: return True\n"
+            "def d() -> list[int]: return []\n"
+            "def e() -> dict[str, int]: return {}\n"
+        )
+        mutants = list(forge._generate_mutants(src))
+        # Only mutants come from the function bodies (return values for SDL,
+        # the True for UOI, etc.) — not the arrows themselves.
+        for line, kind, orig, mut, full_src in mutants:
+            assert "+>" not in mut, f"libcst leaked an arrow mutation: {mut}"
+            assert "-<" not in mut, f"libcst leaked an arrow mutation: {mut}"
+
+
 class TestCycle3IterNumstatCommits:
     """Bug: 3 hand-rolled COMMIT-line parsers in --predict, --carmack and
     the AXE-3 trend pass had silently drifted across cycles. Now there's a

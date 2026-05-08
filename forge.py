@@ -2611,8 +2611,21 @@ MUTATION_OPS = [
 ]
 
 
-def _generate_mutants(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
-    """Generate mutants for a Python source file. Yields (line_no, op_name, original, mutated, full_source)."""
+def _generate_mutants_regex(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
+    """Regex-based mutation generator (legacy backend).
+
+    Yields (line_no, op_name, original, mutated, full_source).
+
+    Cycle 4 D-3a: this is now the FALLBACK backend. The default backend
+    is `_generate_mutants_libcst` (AST-aware), which avoids the 8.8% of
+    invalid mutants the regex approach produces (`->` arrow muté en
+    `+>`, `*unpacking` muté en `/`, `return X` inside string literals
+    truncating the string — see docs/D3_LIBCST_PRESCAN.md).
+
+    Override via `FORGE_MUTATION_BACKEND=regex` to force this path even
+    when libcst is installed. Used automatically when libcst can't be
+    imported (e.g. minimal CI venv without dev deps).
+    """
     source = source_path.read_text(encoding="utf-8", errors="replace")
     lines = source.split("\n")
     for i, line in enumerate(lines):
@@ -2629,6 +2642,235 @@ def _generate_mutants(source_path: Path) -> Iterator[tuple[int, str, str, str, s
                 if mutated_line != line:
                     mutated_source = "\n".join(lines[:i] + [mutated_line] + lines[i+1:])
                     yield (i + 1, op_name, line.strip(), mutated_line.strip(), mutated_source)
+
+
+# === D-3a: libcst AST-aware mutator ===
+# The libcst backend operates on the parsed AST instead of the raw source.
+# Pre-cycle-4 D-3 prescan measured the regex backend at 8.8% invalid mutants
+# (256/2894) — mostly `->` arrow annotations the regex aliases as arithmetic
+# operators, *unpacking aliased as multiplication, and `return X` patterns
+# inside string literals that truncate the literal. libcst sees the actual
+# AST and skips all three by construction.
+#
+# When libcst isn't importable (minimal venv, optional dep), forge falls back
+# to _generate_mutants_regex with a printed notice. Override via env var
+# FORGE_MUTATION_BACKEND={auto,libcst,regex}; default `auto` prefers libcst.
+
+# AST node-class swap tables (operator → its dual). Each candidate matches
+# a class in one of these maps; the mutant is the same node with operator
+# replaced by an instance of the swap class.
+_AOR_SWAP: dict[type, type] = {}
+_ROR_SWAP: dict[type, type] = {}
+_LCR_SWAP: dict[type, type] = {}
+
+
+def _ensure_libcst_swap_maps() -> None:
+    """Lazy-init the libcst swap maps. Called from the libcst backend so
+    forge.py imports cleanly without libcst installed."""
+    global _AOR_SWAP, _ROR_SWAP, _LCR_SWAP
+    if _AOR_SWAP:
+        return
+    import libcst as _cst
+    _AOR_SWAP = {
+        _cst.Add: _cst.Subtract, _cst.Subtract: _cst.Add,
+        _cst.Multiply: _cst.Divide, _cst.Divide: _cst.Multiply,
+    }
+    _ROR_SWAP = {
+        _cst.Equal: _cst.NotEqual, _cst.NotEqual: _cst.Equal,
+        _cst.LessThan: _cst.GreaterThan, _cst.GreaterThan: _cst.LessThan,
+        _cst.LessThanEqual: _cst.GreaterThanEqual,
+        _cst.GreaterThanEqual: _cst.LessThanEqual,
+    }
+    _LCR_SWAP = {_cst.And: _cst.Or, _cst.Or: _cst.And}
+
+
+def _generate_mutants_libcst(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
+    """libcst (AST-aware) mutation generator.
+
+    Walks the parsed module to find all mutable sites (BinaryOperation,
+    Comparison, BooleanOperation, Name "True"/"False", Return). For each
+    site, yields one mutant by rebuilding the tree with that single node
+    swapped. By construction every mutant is a syntactically valid Python
+    module — the 8.8% of invalid mutants the regex backend produces vanish.
+
+    The OneShot transformer is defined inline as a closure so libcst stays
+    a runtime-optional dep (importing libcst here is the only place this
+    function references it; `forge.py` imports cleanly without libcst).
+    """
+    import libcst as cst
+    from libcst.metadata import PositionProvider
+
+    source = source_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        wrapper = cst.MetadataWrapper(cst.parse_module(source))
+    except cst.ParserSyntaxError:
+        return  # source is itself invalid Python; nothing to mutate
+    tree = wrapper.module
+    positions = wrapper.resolve(PositionProvider)
+    _ensure_libcst_swap_maps()
+
+    # === Phase 1: collect mutation sites ===
+    # Each candidate = (kind, target_index_within_kind, line, orig_text,
+    #                   mut_text, swap_target_class)
+    candidates: list[tuple[str, int, int, str, str, Any]] = []
+    counts: dict[str, int] = {"AOR": 0, "ROR": 0, "LCR": 0, "UOI": 0, "SDL": 0}
+
+    def _line_of(node: Any) -> int:
+        try:
+            return int(positions[node].start.line)
+        except KeyError:
+            return 0
+
+    class _Collect(cst.CSTVisitor):
+        def visit_BinaryOperation(self, node: Any) -> None:
+            cls = type(node.operator)
+            if cls in _AOR_SWAP:
+                idx = counts["AOR"]
+                counts["AOR"] = idx + 1
+                candidates.append(("AOR", idx, _line_of(node),
+                                    cls.__name__.lower(),
+                                    _AOR_SWAP[cls].__name__.lower(),
+                                    _AOR_SWAP[cls]))
+
+        def visit_Comparison(self, node: Any) -> None:
+            for ct in node.comparisons:
+                cls = type(ct.operator)
+                if cls in _ROR_SWAP:
+                    idx = counts["ROR"]
+                    counts["ROR"] = idx + 1
+                    candidates.append(("ROR", idx, _line_of(node),
+                                        cls.__name__.lower(),
+                                        _ROR_SWAP[cls].__name__.lower(),
+                                        _ROR_SWAP[cls]))
+
+        def visit_BooleanOperation(self, node: Any) -> None:
+            cls = type(node.operator)
+            if cls in _LCR_SWAP:
+                idx = counts["LCR"]
+                counts["LCR"] = idx + 1
+                candidates.append(("LCR", idx, _line_of(node),
+                                    cls.__name__.lower(),
+                                    _LCR_SWAP[cls].__name__.lower(),
+                                    _LCR_SWAP[cls]))
+
+        def visit_Name(self, node: Any) -> None:
+            if node.value in ("True", "False"):
+                idx = counts["UOI"]
+                counts["UOI"] = idx + 1
+                flipped = "False" if node.value == "True" else "True"
+                candidates.append(("UOI", idx, _line_of(node),
+                                    node.value, flipped, None))
+
+        def visit_Return(self, node: Any) -> None:
+            if node.value is not None and not isinstance(node.value, cst.Name):
+                idx = counts["SDL"]
+                counts["SDL"] = idx + 1
+                candidates.append(("SDL", idx, _line_of(node),
+                                    "return <expr>", "return None", None))
+
+    wrapper.visit(_Collect())
+
+    # === Phase 2: OneShot transformer applies a single mutation per pass ===
+    class _OneShot(cst.CSTTransformer):
+        def __init__(self, kind: str, target_index: int, swap_target: Any) -> None:
+            super().__init__()
+            self.kind = kind
+            self.target_index = target_index
+            self.swap_target = swap_target
+            self.counter = 0
+            self.fired = False
+
+        def _hit(self) -> bool:
+            """Should we fire on this occurrence? Increments counter regardless."""
+            should = (self.counter == self.target_index and not self.fired)
+            self.counter += 1
+            if should:
+                self.fired = True
+            return should
+
+        def leave_BinaryOperation(self, original: Any, updated: Any) -> Any:
+            if self.kind != "AOR" or self.fired:
+                return updated
+            if type(original.operator) in _AOR_SWAP and self._hit():
+                return updated.with_changes(operator=self.swap_target())
+            return updated
+
+        def leave_Comparison(self, original: Any, updated: Any) -> Any:
+            if self.kind != "ROR" or self.fired:
+                return updated
+            new_comparisons = list(updated.comparisons)
+            for i, ct in enumerate(original.comparisons):
+                if type(ct.operator) in _ROR_SWAP and self._hit():
+                    new_comparisons[i] = ct.with_changes(operator=self.swap_target())
+                    return updated.with_changes(comparisons=new_comparisons)
+            return updated
+
+        def leave_BooleanOperation(self, original: Any, updated: Any) -> Any:
+            if self.kind != "LCR" or self.fired:
+                return updated
+            if type(original.operator) in _LCR_SWAP and self._hit():
+                return updated.with_changes(operator=self.swap_target())
+            return updated
+
+        def leave_Name(self, original: Any, updated: Any) -> Any:
+            if self.kind != "UOI" or self.fired:
+                return updated
+            if original.value in ("True", "False") and self._hit():
+                return updated.with_changes(
+                    value=("False" if original.value == "True" else "True"))
+            return updated
+
+        def leave_Return(self, original: Any, updated: Any) -> Any:
+            if self.kind != "SDL" or self.fired:
+                return updated
+            if (original.value is not None
+                    and not isinstance(original.value, cst.Name)
+                    and self._hit()):
+                return updated.with_changes(value=cst.Name("None"))
+            return updated
+
+    for kind, target_idx, line, orig_text, mut_text, swap_target in candidates:
+        mutator = _OneShot(kind=kind, target_index=target_idx,
+                           swap_target=swap_target)
+        mutated_tree = tree.visit(mutator)
+        if not mutator.fired:
+            continue  # belt-and-suspenders; never expected
+        yield (line, kind, orig_text, mut_text, mutated_tree.code)
+
+
+def _generate_mutants(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
+    """Dispatch to the libcst (AST-aware) backend by default; fall back to
+    the regex backend when libcst isn't installed.
+
+    Override via env var FORGE_MUTATION_BACKEND:
+      auto    (default) prefer libcst, fall back to regex if libcst absent
+      libcst  hard-require libcst, raise if missing
+      regex   force regex backend regardless of libcst availability
+    """
+    backend = os.environ.get("FORGE_MUTATION_BACKEND", "auto").lower()
+    if backend == "regex":
+        print("  mutation backend: regex (FORGE_MUTATION_BACKEND=regex override)")
+        yield from _generate_mutants_regex(source_path)
+        return
+    if backend not in ("auto", "libcst"):
+        print(f"  WARNING: unknown FORGE_MUTATION_BACKEND={backend!r}, "
+              f"falling back to auto")
+        backend = "auto"
+    try:
+        import libcst  # noqa: F401
+    except ImportError:
+        if backend == "libcst":
+            raise RuntimeError(
+                "FORGE_MUTATION_BACKEND=libcst requires libcst — "
+                "install with `pip install libcst` or `pip install forge-shield[dev]`."
+            )
+        print("  mutation backend: regex (libcst not installed; "
+              "`pip install libcst` for AST-aware mutator)")
+        yield from _generate_mutants_regex(source_path)
+        return
+    print("  mutation backend: libcst (AST-aware; "
+          "set FORGE_MUTATION_BACKEND=regex to fall back)")
+    yield from _generate_mutants_libcst(source_path)
 
 
 def _try_one_mutant(
