@@ -51,6 +51,7 @@ forge = "forge:main"
 Homepage = "https://github.com/sky1241/forge"
 Issues = "https://github.com/sky1241/forge/issues"
 Repository = "https://github.com/sky1241/forge"
+Changelog = "https://github.com/sky1241/forge/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 py-modules = ["forge"]
