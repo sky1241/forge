@@ -2376,6 +2376,45 @@ def _generate_mutants(source_path):
                     yield (i + 1, op_name, line.strip(), mutated_line.strip(), mutated_source)
 
 
+def _try_one_mutant(src, original, mut_source, test_paths, root, timeout):
+    """Apply one mutant to `src`, run the test suite, restore original.
+    Extracted from run_mutation's inner loop so the write-inside-try
+    invariant can be verified by a real behavior test (cycle 4 P3)
+    instead of grep-on-source.
+
+    Returns a dict {"status": "killed"|"survived"|"timeout"}.
+
+    Invariant: after this function returns OR raises, `src` contains
+    `original`. Even if write_text(mut_source) raises (disk full,
+    permission flip, EROFS), the finally branch restores. Even if
+    pytest crashes inside subprocess.run, finally runs.
+
+    The function deliberately doesn't catch generic Exception — only
+    the documented `subprocess.TimeoutExpired` is mapped to a status.
+    Any other exception (write failure, OS error, KeyboardInterrupt)
+    propagates AFTER the original is restored, so the outer caller
+    can decide whether to abort or continue.
+    """
+    try:
+        src.write_text(mut_source, encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest"] + test_paths +
+            ["-x", "-q", "--tb=no", "--no-header"],
+            capture_output=True, text=True, cwd=str(root),
+            timeout=timeout, encoding="utf-8", errors="replace",
+        )
+        if r.returncode != 0:
+            return {"status": "killed"}
+        return {"status": "survived"}
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout"}
+    finally:
+        # ALWAYS restore the original — even if write_text above raised
+        # (mutant never reached pytest) or the pytest subprocess raised
+        # something other than TimeoutExpired.
+        src.write_text(original, encoding="utf-8")
+
+
 def run_mutation(root, target_file=None, cfg=None):
     """Pure-Python mutation testing. No external deps. Offutt 1996: 5 operators suffice.
     Mutation score = killed / total. Target: >80%."""
@@ -2438,39 +2477,28 @@ def run_mutation(root, target_file=None, cfg=None):
             continue
         print(f"  {src.name}: {len(mutants)} mutants", end="", flush=True)
         for line_no, op, orig_line, mut_line, mut_source in mutants:
-            # Apply mutant inside the try so the finally branch always runs
-            # — even if write_text itself raises (disk full, permission flip
-            # mid-loop). Otherwise the source could be left half-written
-            # without a restore.
-            try:
-                src.write_text(mut_source, encoding="utf-8")
-                r = subprocess.run(
-                    [sys.executable, "-m", "pytest"] + test_paths +
-                    ["-x", "-q", "--tb=no", "--no-header"],
-                    capture_output=True, text=True, cwd=str(root),
-                    timeout=mutant_timeout, encoding="utf-8", errors="replace"
-                )
-                if r.returncode != 0:
-                    killed += 1
-                    print(".", end="", flush=True)
-                else:
-                    survived += 1
-                    sev = _hamming_severity(orig_line, mut_line)
-                    sev_label = "SEVERE" if sev >= 5 else "moderate" if sev >= 2 else "minor"
-                    survivors.append(f"L{line_no} [{op}] {orig_line} -> {mut_line}  (Hamming={sev}, {sev_label})")
-                    print("S", end="", flush=True)
-            except subprocess.TimeoutExpired:
-                # Per mutation-testing convention, a timeout means the mutant
-                # broke the code into a non-terminating state — counted as
-                # killed. This is only honest when the timeout is calibrated
-                # to the baseline (>= 2x baseline duration), which the
-                # auto-derivation above ensures by default.
+            outcome = _try_one_mutant(
+                src, original, mut_source,
+                test_paths=test_paths, root=root, timeout=mutant_timeout,
+            )
+            if outcome["status"] == "killed":
+                killed += 1
+                print(".", end="", flush=True)
+            elif outcome["status"] == "timeout":
+                # Per mutation-testing convention a timeout = mutant broke
+                # the code into a non-terminating state, counted as killed.
                 timeout_count += 1
                 killed += 1
                 print("T", end="", flush=True)
-            finally:
-                # ALWAYS restore original
-                src.write_text(original, encoding="utf-8")
+            else:
+                survived += 1
+                sev = _hamming_severity(orig_line, mut_line)
+                sev_label = "SEVERE" if sev >= 5 else "moderate" if sev >= 2 else "minor"
+                survivors.append(
+                    f"L{line_no} [{op}] {orig_line} -> {mut_line}  "
+                    f"(Hamming={sev}, {sev_label})"
+                )
+                print("S", end="", flush=True)
         print()
 
     total = killed + survived
@@ -3048,6 +3076,42 @@ def flaky_dtw(root, runs=None):
     return flaky_tests
 
 
+# === --WATCH HELPERS — extracted for testability (cycle 4 P3) ===
+def _watch_iteration(root, last_hash):
+    """One iteration of the --watch loop, extracted so it's testable.
+
+    Hashes every .py file in the repo (skipping .forge / __pycache__).
+    If the hash changed since `last_hash`, clears the screen, runs the
+    test suite, prints the diff vs baseline, logs the run, and writes
+    the latest report. read_bytes() may race with editor saves (file
+    removed/moved between rglob and read) — those reads are skipped.
+
+    Returns the new hash, which the caller passes back as `last_hash`
+    on the next iteration. The caller is responsible for the
+    KeyboardInterrupt / generic-Exception envelope around this call —
+    keeping the survival guard in main() means a crash inside this
+    function still gets caught and the loop continues.
+    """
+    h = hashlib.md5()
+    for f in sorted(root.rglob("*.py")):
+        if ".forge" in str(f) or "__pycache__" in str(f):
+            continue
+        try:
+            h.update(f.read_bytes())
+        except (OSError, FileNotFoundError):
+            continue
+    current = h.hexdigest()
+    if current == last_hash:
+        return last_hash
+    os.system("cls" if os.name == "nt" else "clear")
+    results = run_tests(root)
+    baseline = load_json(str(root / BASELINE_FILE))
+    print_report(results, baseline)
+    log_run(root, results)
+    save_json(str(root / REPORT_FILE), results)
+    return current
+
+
 # === FULL CYCLE — The complete pipeline (metaprompt synthesis) ===
 def full_cycle(root):
     """Run the full forge pipeline: predict -> mutate -> gen-props -> test -> flaky -> locate.
@@ -3376,25 +3440,7 @@ def main():
         last_hash = ""
         while True:
             try:
-                # Hash all .py files. read_bytes() may race with editor saves
-                # (file removed/moved between rglob and read) — skip those.
-                h = hashlib.md5()
-                for f in sorted(root.rglob("*.py")):
-                    if ".forge" in str(f) or "__pycache__" in str(f):
-                        continue
-                    try:
-                        h.update(f.read_bytes())
-                    except (OSError, FileNotFoundError):
-                        continue
-                current = h.hexdigest()
-                if current != last_hash:
-                    last_hash = current
-                    os.system("cls" if os.name == "nt" else "clear")
-                    results = run_tests(root)
-                    baseline = load_json(str(root / BASELINE_FILE))
-                    print_report(results, baseline)
-                    log_run(root, results)
-                    save_json(str(root / REPORT_FILE), results)
+                last_hash = _watch_iteration(root, last_hash)
             except KeyboardInterrupt:
                 print("\n  --watch stopped.")
                 return

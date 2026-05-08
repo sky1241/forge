@@ -1469,56 +1469,190 @@ class TestCycle3LouvainDeterministic:
         assert abs(q1 - q2) < 1e-9, f"Q must match too: {q1} vs {q2}"
 
 
-class TestCycle3WatchSurvivesErrors:
-    """Bug 5: --watch's inner loop had no try/except. A single read_bytes()
-    on a vanished file (vim swap), or a pytest crash, killed the whole loop
-    silently — the user thought watch was running while it had died."""
+class TestCycle4P3WatchIteration:
+    """Cycle 4 P3 replaces the cycle 3 chunk 2 grep-on-source test
+    (test_watch_loop_module_has_try_except — pure substring check on
+    forge.py source) with real behavior tests on the extracted
+    `_watch_iteration(root, last_hash)` helper. The helper does the work
+    of one watch tick; the survival envelope (KeyboardInterrupt + generic
+    Exception → log + sleep + retry) lives in main()'s loop.
 
-    def test_watch_loop_module_has_try_except(self):
-        """The simplest structural check: the source of forge.py contains a
-        try/except inside the --watch block. We can't run an infinite loop
-        in a test, so we assert the structure."""
-        src = (Path(forge.__file__) if hasattr(forge, "__file__") and forge.__file__
-               else Path(__file__).parent.parent / "forge.py").read_text()
-        # Locate the --watch block
-        idx = src.find('if "--watch" in args:')
-        assert idx > 0, "--watch block not found"
-        # The next 1500 chars (the watch block body) must contain a try/except
-        block = src[idx:idx + 1500]
-        assert "try:" in block, f"--watch must wrap loop body in try/except:\n{block[:500]}"
-        assert "except KeyboardInterrupt" in block, (
-            f"--watch must catch KeyboardInterrupt cleanly:\n{block[:500]}"
+    Pre-P3 the structural test could be defeated by either: a try/except
+    that wrapped nothing meaningful, or a rename of `if "--watch" in args:`
+    that broke the test without changing behavior. Now we exercise the
+    real code path and assert observable side-effects.
+    """
+
+    def test_watch_iteration_no_change_returns_same_hash(self, tmp_path, monkeypatch, capsys):
+        """If the .py hash didn't change since last call, the helper must
+        skip the test run entirely and return the unchanged hash. We mock
+        run_tests so the helper never actually invokes pytest."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "x.py").write_text("def f(): return 1\n")
+        called = {"runs": 0}
+
+        def fake_run_tests(*a, **kw):
+            called["runs"] += 1
+            return {"total": 1, "passed": 1, "failed": 0, "errors": 0,
+                    "skipped": 0, "details": [], "duration": 0.1,
+                    "passed_tests": [], "failed_tests": [],
+                    "xfailed_tests": [], "xpassed_tests": []}
+
+        monkeypatch.setattr(forge, "run_tests", fake_run_tests)
+        h1 = forge._watch_iteration(repo, last_hash="")
+        capsys.readouterr()
+        assert called["runs"] == 1, "first iteration must run tests once"
+
+        # Calling again with the same hash → no change → no re-run
+        h2 = forge._watch_iteration(repo, last_hash=h1)
+        assert h1 == h2, "stable repo must yield stable hash"
+        assert called["runs"] == 1, "no change should NOT re-run tests"
+
+    def test_watch_iteration_skips_unreadable_files(self, tmp_path, monkeypatch):
+        """A file that disappears between rglob and read_bytes (editor
+        swap, NFS race) used to crash the loop. _watch_iteration catches
+        OSError / FileNotFoundError per-file and continues."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "good.py").write_text("x = 1\n")
+        (repo / "vanished.py").write_text("y = 2\n")
+        # Mock run_tests so we don't invoke real pytest in the test
+        monkeypatch.setattr(forge, "run_tests", lambda *a, **kw:
+                            {"total": 0, "passed": 0, "failed": 0, "errors": 0,
+                             "skipped": 0, "details": [], "duration": 0.0,
+                             "passed_tests": [], "failed_tests": [],
+                             "xfailed_tests": [], "xpassed_tests": []})
+        original_read = Path.read_bytes
+
+        def fake_read(self):
+            if self.name == "vanished.py":
+                raise FileNotFoundError(self)
+            return original_read(self)
+
+        monkeypatch.setattr(Path, "read_bytes", fake_read)
+        # Must not raise — the unreadable file is silently skipped
+        h = forge._watch_iteration(repo, last_hash="")
+        assert isinstance(h, str) and h, (
+            "iteration should still produce a hash from readable files"
         )
-        assert "except Exception" in block or "except (OSError" in block, (
-            f"--watch must catch transient errors:\n{block[:500]}"
+
+    def test_watch_iteration_propagates_real_failures(self, tmp_path, monkeypatch):
+        """Generic Exception (e.g. pytest crashed) MUST propagate out of
+        the helper so main() can log it via the survival envelope. The
+        helper itself is not the survival barrier — it's just one tick."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "x.py").write_text("import sys\n")
+        # Force run_tests to raise; the iteration must propagate so main()
+        # can log "watch error (continuing)" and retry — burying it inside
+        # _watch_iteration would silently freeze the watch state.
+        monkeypatch.setattr(forge, "run_tests",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("pytest blew up")))
+        with pytest.raises(RuntimeError, match="pytest blew up"):
+            forge._watch_iteration(repo, last_hash="initial-mismatch")
+
+
+class TestCycle4P3TryOneMutant:
+    """Cycle 4 P3 replaces TestCycle3MutateWriteInsideTry (grep-on-source
+    on forge.py with a 6000-char window) with real behavior tests on the
+    extracted `_try_one_mutant(src, original, mut_source, ...)` helper.
+
+    The contract: after the helper returns OR raises, `src` contains
+    `original`. Pre-cycle3-bug6, write_text was outside the try, so a
+    write_text failure left the source corrupted. The new test verifies
+    the contract directly by patching write_text to raise on the mutant
+    write and asserting `src.read_text() == original` afterwards."""
+
+    def test_mutant_killed_when_pytest_returns_nonzero(self, tmp_path, monkeypatch):
+        src = tmp_path / "x.py"
+        original = "def f(): return 1\n"
+        mut_source = "def f(): return 2\n"
+        src.write_text(original)
+        monkeypatch.setattr(forge.subprocess, "run", lambda *a, **kw:
+                            subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=""))
+        outcome = forge._try_one_mutant(
+            src, original, mut_source, test_paths=[], root=tmp_path, timeout=10,
         )
+        assert outcome["status"] == "killed"
+        # Original restored
+        assert src.read_text() == original
 
-
-class TestCycle3MutateWriteInsideTry:
-    """Bug 6: run_mutation wrote the mutated source BEFORE the try/finally
-    block. If write_text itself raised (disk full, permission flip), the
-    finally branch never ran and the file stayed corrupted. Now write_text
-    is inside the try."""
-
-    def test_mutate_loop_writes_inside_try(self):
-        # NOTE: this is the cycle 3 chunk 2 grep-on-source test. P3 of
-        # cycle 4 replaces it with a real behavior test (extract
-        # _try_one_mutant + monkeypatch write_text). Until P3 lands the
-        # window size is bumped from 4000 to 6000 chars so the cfg-loading
-        # preamble added by cycle 4 P1 (run_mutation now reads a config)
-        # doesn't push the `finally:` out of range.
-        src = (Path(forge.__file__) if hasattr(forge, "__file__") and forge.__file__
-               else Path(__file__).parent.parent / "forge.py").read_text()
-        idx = src.find("def run_mutation(")
-        assert idx > 0
-        body = src[idx:idx + 6000]
-        try_pos = body.find("try:", body.find("for line_no"))
-        finally_pos = body.find("finally:", try_pos)
-        assert try_pos > 0 and finally_pos > try_pos
-        between = body[try_pos:finally_pos]
-        assert "src.write_text(mut_source" in between, (
-            f"mut_source write must be inside try block:\n{between[:400]}"
+    def test_mutant_survived_when_pytest_returns_zero(self, tmp_path, monkeypatch):
+        src = tmp_path / "x.py"
+        original = "x = 1\n"
+        src.write_text(original)
+        monkeypatch.setattr(forge.subprocess, "run", lambda *a, **kw:
+                            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
+        outcome = forge._try_one_mutant(
+            src, original, "x = 2\n", test_paths=[], root=tmp_path, timeout=10,
         )
+        assert outcome["status"] == "survived"
+        assert src.read_text() == original
+
+    def test_mutant_timeout_still_restores_original(self, tmp_path, monkeypatch):
+        src = tmp_path / "x.py"
+        original = "x = 1\n"
+        src.write_text(original)
+
+        def fake_run(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd=a[0] if a else [], timeout=10)
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        outcome = forge._try_one_mutant(
+            src, original, "x = 999\n", test_paths=[], root=tmp_path, timeout=10,
+        )
+        assert outcome["status"] == "timeout"
+        # The mutant was written but the timeout fired — finally MUST
+        # have restored.
+        assert src.read_text() == original
+
+    def test_write_failure_on_mutant_propagates_with_original_intact(self, tmp_path, monkeypatch):
+        """The cycle 3 bug 6 scenario: write_text(mut_source) itself
+        raises (disk full, EROFS, permission flip). Pre-fix the source
+        was left in an inconsistent state. Now the finally restores
+        before the exception propagates."""
+        src = tmp_path / "x.py"
+        original = "GOOD\n"
+        src.write_text(original)
+        original_write = Path.write_text
+        # Track which call: 1st = mutant write (must raise), 2nd = restore (must succeed)
+        call_count = {"n": 0}
+
+        def fake_write(self, data, *a, **kw):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise OSError("disk full")
+            return original_write(self, data, *a, **kw)
+
+        monkeypatch.setattr(Path, "write_text", fake_write)
+        with pytest.raises(OSError, match="disk full"):
+            forge._try_one_mutant(
+                src, original, "BAD\n", test_paths=[], root=tmp_path, timeout=10,
+            )
+        # Restore happened in finally even though the try raised before
+        # subprocess.run was reached.
+        assert src.read_text() == original, (
+            "finally MUST restore original even when mutant write raises"
+        )
+        # Two writes happened: failed mutant write + finally restore
+        assert call_count["n"] == 2
+
+    def test_pytest_crash_restores_original(self, tmp_path, monkeypatch):
+        """If subprocess.run raises something other than TimeoutExpired
+        (Python crash inside pytest, OOM kill, etc.), the exception
+        propagates but the original is still restored."""
+        src = tmp_path / "x.py"
+        original = "ORIG\n"
+        src.write_text(original)
+
+        def fake_run(*a, **kw):
+            raise RuntimeError("pytest panicked")
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="pytest panicked"):
+            forge._try_one_mutant(
+                src, original, "MUT\n", test_paths=[], root=tmp_path, timeout=10,
+            )
+        assert src.read_text() == original
 
 
 class TestCycle3BaselineRefusesEmpty:
