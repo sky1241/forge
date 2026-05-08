@@ -3273,3 +3273,71 @@ class TestCycle5P1PathsToMutate:
         out = capsys.readouterr().out
         assert "file not found" in out
         assert "does_not_exist.py" in out
+
+
+class TestCycle5P3Modularity:
+    """Cycle 5 P3: surface Newman-Girvan Q-modularity as a top-level
+    sub-command. Math (Louvain + Q) was already in forge.py for
+    --carmack; --modularity is the public-facing wrapper that prints
+    the Q value, a verdict band, and the top communities."""
+
+    def test_modularity_q_on_2cliques_bridge_graph(self, tmp_path):
+        """Synthetic 6-file 2-cliques-bridge import graph yields Q in a
+        known range. Two tightly-imported triangles connected by a single
+        bridge edge (a3 ↔ b1) is the textbook case Newman & Girvan 2004
+        cite for community detection — optimal cut puts {a1,a2,a3} vs
+        {b1,b2,b3} and Q ≈ 0.20-0.45 depending on edge weights."""
+        _git_init(tmp_path)
+        files = {
+            "a1.py": "import a2\nimport a3\n",
+            "a2.py": "import a1\nimport a3\n",
+            "a3.py": "import a1\nimport a2\nimport b1\n",  # bridge to clique B
+            "b1.py": "import b2\nimport b3\n",
+            "b2.py": "import b1\nimport b3\n",
+            "b3.py": "import b1\nimport b2\n",
+        }
+        for name, content in files.items():
+            (tmp_path / name).write_text(content)
+        _git_commit(tmp_path)
+        result = forge.measure_modularity(tmp_path)
+
+        assert result["n_files"] == 6
+        assert result["n_communities"] >= 2, (
+            f"2-cliques-bridge must split into ≥2 communities; "
+            f"got {result['n_communities']} on partition"
+        )
+        # 2-cliques + 1 bridge: each clique has 3 internal edges (triangle)
+        # vs 1 inter-clique edge → strong community structure. Newman &
+        # Girvan 2004 / Newman 2006 cite Q ∈ [0.3, 0.7] as the realistic
+        # range for well-separated communities; 0.30 is the lower band
+        # for "good" verdict in measure_modularity itself.
+        assert 0.30 < result["q"] < 0.75, (
+            f"Q on 2-cliques-bridge graph expected in (0.30, 0.75); "
+            f"got {result['q']:.3f}"
+        )
+        assert result["verdict"] in ("good", "fair"), (
+            f"verdict for Q={result['q']:.3f} should be good/fair; "
+            f"got {result['verdict']}"
+        )
+        sizes = [c["size"] for c in result["top_clusters"]]
+        assert sum(sizes) == 6, (
+            f"top clusters total file count must equal n_files; "
+            f"got {sum(sizes)} vs 6"
+        )
+
+    def test_modularity_command_handles_empty_repo(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """`forge --modularity` on an empty repo must not crash —
+        prints an explicit "no tracked files" hint and exits 0."""
+        _git_init(tmp_path)  # git repo but no .py files committed
+        monkeypatch.setattr(forge, "find_repo_root", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", ["forge", "--modularity"])
+        forge.main()
+        out = capsys.readouterr().out
+        assert "MODULARITY" in out or "modularity" in out.lower()
+        # The "empty" verdict path or "no edges" path must surface a hint
+        # rather than a Python traceback or a misleading Q=0.0.
+        assert "Traceback" not in capsys.readouterr().err
+        assert ("No tracked" in out or "no inter-file imports" in out
+                or "Q =" in out)

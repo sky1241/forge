@@ -637,6 +637,118 @@ def _modularity_contribution(graph: dict[str, list[str]]) -> dict[str, float]:
     return {f: max(contrib.get(f, 0.0), 0.0) / max_pos for f in graph}
 
 
+def measure_modularity(root: Path) -> dict[str, Any]:
+    """Cycle 5 P3: surface Newman-Girvan Q-modularity over the import graph
+    as a top-level signal. Uses _build_import_graph + _louvain_clustering
+    + _modularity_q (already implemented for predict_carmack) and packages
+    the result for the --modularity sub-command.
+
+    Q ≥ 0.30 means well-isolated modules (good architecture). Q < 0.15
+    means the codebase is tightly coupled (mutations propagate, bug fixes
+    have unexpected side-effects). Newman 2006 "Modularity and community
+    structure in networks" defines the metric; Q ranges in [-0.5, 1] but
+    realistic codebases sit in [0, 0.7].
+
+    Returns a dict with: q, verdict ('good'/'fair'/'low'/'empty'/'no edges'),
+    n_files, n_communities, top_clusters (list of {id, size, q_contribution}).
+    """
+    graph = _build_import_graph(root)
+    if not graph:
+        return {
+            "q": 0.0, "verdict": "empty",
+            "n_files": 0, "n_communities": 0, "top_clusters": [],
+        }
+
+    # Symmetrize the directed import graph into a weighted undirected adj
+    # — same recipe as _modularity_contribution. Each directed edge a→b
+    # contributes weight 1.0 to both adj[a][b] and adj[b][a] so reciprocal
+    # imports compound to weight 2.
+    adj: dict[str, dict[str, float]] = {f: {} for f in sorted(graph)}
+    for src in sorted(graph):
+        for tgt in sorted(graph[src]):
+            if tgt not in adj:
+                adj[tgt] = {}
+            adj[src][tgt] = adj[src].get(tgt, 0.0) + 1.0
+            adj[tgt][src] = adj[tgt].get(src, 0.0) + 1.0
+
+    if all(not v for v in adj.values()):
+        return {
+            "q": 0.0, "verdict": "no edges",
+            "n_files": len(graph), "n_communities": 0, "top_clusters": [],
+        }
+
+    partition, q = _louvain_clustering(adj)
+    two_m = sum(sum(neigh.values()) for neigh in adj.values())
+    degree = {n: sum(adj[n].values()) for n in adj}
+
+    # Per-cluster Q contribution: how much each community's internal
+    # connectivity exceeds the random-graph expectation. Sum across all
+    # clusters equals the global Q.
+    cluster_q: dict[int, float] = {}
+    cluster_size: dict[int, int] = {}
+    for n, c in partition.items():
+        cluster_size[c] = cluster_size.get(c, 0) + 1
+        cluster_q.setdefault(c, 0.0)
+        for m, w in adj[n].items():
+            if partition[m] == c:
+                cluster_q[c] += w - (degree[n] * degree[m]) / two_m
+    if two_m > 0:
+        cluster_q = {c: q_val / two_m for c, q_val in cluster_q.items()}
+
+    # Verdict thresholds per Sky's brief — empirical bands, not statistical
+    # tests. A user staring at Q = 0.42 wants "good" not "p < 0.05".
+    if q >= 0.30:
+        verdict = "good"
+    elif q >= 0.15:
+        verdict = "fair"
+    else:
+        verdict = "low"
+
+    # Top 3 communities by file count, with their Q contribution.
+    top_ids = sorted(cluster_size, key=lambda c: cluster_size[c], reverse=True)[:3]
+    top_clusters = [
+        {"id": c, "size": cluster_size[c], "q_contribution": cluster_q.get(c, 0.0)}
+        for c in top_ids
+    ]
+
+    return {
+        "q": q, "verdict": verdict,
+        "n_files": len(graph),
+        "n_communities": len(set(partition.values())),
+        "top_clusters": top_clusters,
+    }
+
+
+def print_modularity_report(root: Path) -> None:
+    """Human-friendly stdout for `forge --modularity`."""
+    result = measure_modularity(root)
+    bar = "=" * 50
+    print(f"\n{bar}")
+    print("  MODULARITY — Newman-Girvan Q over import graph")
+    print(f"{bar}")
+    if result["verdict"] == "empty":
+        print("  No tracked .py files (empty repo or git issue).")
+        return
+    if result["verdict"] == "no edges":
+        print(f"  {result['n_files']} files but no inter-file imports — "
+              "Q is undefined. Try after the codebase has some structure.")
+        return
+    q = result["q"]
+    if result["verdict"] == "good":
+        verdict_msg = f"good — modules are well isolated (Q ≥ 0.30)"
+    elif result["verdict"] == "fair":
+        verdict_msg = f"fair — some coupling (0.15 ≤ Q < 0.30)"
+    else:
+        verdict_msg = f"low — code is tightly coupled (Q < 0.15)"
+    print(f"  Q = {q:.3f} ({verdict_msg})")
+    print(f"  {result['n_files']} files in {result['n_communities']} communities\n")
+    print(f"  Top {len(result['top_clusters'])} communities by size:")
+    for c in result["top_clusters"]:
+        print(f"    cluster #{c['id']:3d}  {c['size']:4d} files  "
+              f"Q-contrib {c['q_contribution']:+.3f}")
+    print(f"{bar}\n")
+
+
 def _check_dep(name: str, pip_name: str | None = None) -> Any:
     """Try to import optional dependency, return module or None."""
     try:
@@ -3738,6 +3850,7 @@ ANALYTICS
   forge --anomaly [--weeks N]      flag commits with anomalous activity
   forge --heatmap                  show per-file failure heatmap
   forge --locate                   Ochiai SBFL fault localization (needs coverage.py)
+  forge --modularity               Newman-Girvan Q over the import graph
 
 FLAKY / BISECT
   forge --flaky [N]                re-run failing tests N times to classify flaky
@@ -3776,7 +3889,7 @@ KNOWN_FLAGS = {
     "-h", "-v",
     # boolean / action flags (no value, or value provided as next non-flag arg)
     "--help", "--version", "--baseline", "--init", "--fast", "--watch", "--full-cycle",
-    "--carmack", "--anomaly", "--heatmap", "--locate", "--predict",
+    "--carmack", "--anomaly", "--heatmap", "--locate", "--predict", "--modularity",
     "--snapshot-check", "--diff", "--verbose", "--include-destructive",
     # flags that take a value
     "--bisect", "--add", "--close", "--minimize", "--gen-props",
@@ -4086,6 +4199,10 @@ def main() -> None:
     if "--locate" in args:
         if not fault_locate(root):
             sys.exit(1)
+        return
+
+    if "--modularity" in args:
+        print_modularity_report(root)
         return
 
     if "--watch" in args:
