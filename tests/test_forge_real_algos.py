@@ -2304,6 +2304,109 @@ class TestCycle3CliValidation:
         assert "--carmack" in out
 
 
+class TestCycle4P8AtomicWriteAndLock:
+    """Cycle 4 P8: cousin pc1 audit flagged save_json + log_run as
+    non-atomic / unlocked.
+
+      save_json: open + json.dump → Ctrl+C mid-write left baseline.json
+      truncated, next run lost the baseline silently (JSONDecodeError →
+      None → no diff possible).
+
+      log_run: open + write with no lock → 2 forge processes writing
+      concurrently could interleave bytes within a line → JSONL file
+      corruption that makes show_heatmap fail to parse.
+
+    P8 fixes both: tempfile + os.replace for save_json, fcntl.flock
+    around log_run's append on POSIX (best-effort on Windows).
+    """
+
+    def test_save_json_round_trip(self, tmp_path):
+        """Sanity: standard write+read still works after atomic rewrite."""
+        p = tmp_path / "x.json"
+        forge.save_json(str(p), {"a": 1, "b": [2, 3]})
+        assert p.exists()
+        loaded = json.loads(p.read_text())
+        assert loaded == {"a": 1, "b": [2, 3]}
+
+    def test_save_json_atomic_under_simulated_kill(self, tmp_path, monkeypatch):
+        """If json.dump raises mid-write (simulating Ctrl+C), the tmp
+        file is removed AND the original target is left untouched.
+
+        Pre-P8: the target was already opened in 'w' mode, so even an
+        early raise had truncated it to empty. Post-P8: writes go to a
+        tempfile in the same dir, original is replaced atomically OR
+        not at all.
+        """
+        p = tmp_path / "baseline.json"
+        forge.save_json(str(p), {"version": 1, "passed": 100})
+        before = p.read_text()
+        assert "passed" in before
+
+        def boom(*a, **kw):
+            raise KeyboardInterrupt("user hit Ctrl+C mid-write")
+        monkeypatch.setattr(forge.json, "dump", boom)
+
+        with pytest.raises(KeyboardInterrupt):
+            forge.save_json(str(p), {"version": 2, "passed": 999})
+
+        after = p.read_text()
+        assert after == before, (
+            "atomic write contract broken: target was modified despite the crash"
+        )
+        leftovers = [f for f in tmp_path.iterdir()
+                     if f.name.startswith("baseline.json.") and f.suffix == ".tmp"]
+        assert leftovers == [], f"unclean tmp files survived: {leftovers}"
+
+    def test_save_json_creates_parent_dirs(self, tmp_path):
+        """Passing a path under a nonexistent directory still works."""
+        p = tmp_path / "deep" / "nested" / "x.json"
+        forge.save_json(str(p), {"a": 1})
+        assert p.exists()
+
+    def test_log_run_appends_one_jsonl_line(self, tmp_path):
+        """Single-process: append produces exactly one JSONL line."""
+        results = {"passed": 5, "failed": 0, "errors": 0, "total": 5,
+                   "duration": 1.2}
+        forge.log_run(tmp_path, results)
+        log = tmp_path / forge.FORGE_LOG
+        assert log.exists()
+        lines = log.read_text().strip().split("\n")
+        assert len(lines) == 1
+        json.loads(lines[0])
+
+    def test_log_run_concurrent_writes_keep_line_integrity(self, tmp_path):
+        """Multi-thread concurrent log_run: every line in the final log
+        must be valid JSON. Pre-P8 (no fcntl): possible interleaved
+        writes producing lines like `{"passed": 5{"passed": 7}\\n}` that
+        JSONDecodeError on read."""
+        import threading
+        results = {"passed": 1, "failed": 0, "errors": 0, "total": 1,
+                   "duration": 0.1}
+
+        def writer():
+            for _ in range(20):
+                forge.log_run(tmp_path, results)
+
+        threads = [threading.Thread(target=writer) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        log = tmp_path / forge.FORGE_LOG
+        lines = [ln for ln in log.read_text().split("\n") if ln.strip()]
+        assert len(lines) == 80, f"expected 80 lines, got {len(lines)}"
+        for i, ln in enumerate(lines):
+            try:
+                obj = json.loads(ln)
+            except json.JSONDecodeError as e:
+                raise AssertionError(
+                    f"line {i} corrupted (not valid JSON): {ln!r}\n"
+                    f"  parse error: {e}"
+                )
+            assert obj["passed"] == 1
+
+
 class TestCycle4P6HiddenMagicNumbers:
     """Cycle 4 P6: cousin pc1 audit caught 5 magic numbers P1 missed
     because they weren't already declared in FORGE_CONFIG_DEFAULTS —

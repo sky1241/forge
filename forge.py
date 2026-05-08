@@ -996,10 +996,53 @@ def load_json(path):
 
 
 def save_json(path, data):
-    """Save JSON file."""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    """Save JSON file atomically.
+
+    Cycle 4 P8 fix: pre-P8 we did `open(path, "w") + json.dump` which is
+    NOT atomic — Ctrl+C / power loss / OOM during the write left a
+    partially-written file on disk. Next forge run would `load_json` it,
+    catch JSONDecodeError, return None, and silently lose the baseline
+    or report data.
+
+    Now we write to a temp file in the SAME directory (so os.replace can
+    do an atomic rename — across-fs replace is not atomic on Linux), then
+    atomically rename to `path`. If anything raises during write, the
+    temp file is removed and `path` is unchanged.
+    """
+    import tempfile
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # delete=False so we can manage rename ourselves; suffix .tmp so a
+    # crash leaves an obvious orphan instead of looking like real data.
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=str(target.parent),
+        prefix=target.name + ".", suffix=".tmp", delete=False,
+    )
+    moved = False
+    try:
+        json.dump(data, tmp, indent=2, ensure_ascii=False)
+        tmp.flush()
+        os.fsync(tmp.fileno())  # ensure data hits disk before rename
+        tmp.close()
+        # os.replace is atomic on POSIX and Windows. On the same filesystem
+        # this guarantees readers either see the OLD content or the NEW —
+        # never a half-written file.
+        os.replace(tmp.name, str(target))
+        moved = True
+    finally:
+        # finally (not except Exception) so KeyboardInterrupt + SystemExit
+        # — both BaseException-derived — still trigger cleanup. Without
+        # this the tmp file lingers as a `<name>.<random>.tmp` zombie.
+        if not moved:
+            if not tmp.closed:
+                try:
+                    tmp.close()
+                except OSError:
+                    pass
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
 
 def print_report(results, baseline=None):
@@ -1201,7 +1244,21 @@ def close_bug(root, bug_id):
 
 
 def log_run(root, results):
-    """Append to forge log."""
+    """Append one JSONL entry to the forge log under fcntl.LOCK_EX (POSIX).
+
+    Cycle 4 P8 fix: pre-P8 this was a bare `open(..., "a") + write` with
+    no lock. Two forge instances writing concurrently (e.g. user running
+    `--watch` in one shell + `--fast` in another) could interleave their
+    writes mid-line and corrupt the JSONL file. POSIX guarantees atomicity
+    only for writes < PIPE_BUF (4096 bytes), and only for pipes — not
+    regular files. So we take an exclusive lock around the append.
+
+    Windows doesn't have fcntl. The fallback there is a best-effort
+    write without lock — Windows forge users running concurrent
+    instances can still see interleaving. Documented as known limitation
+    in the docstring rather than papered over with msvcrt.locking, which
+    has different semantics (byte-range, not whole-file).
+    """
     log_path = root / FORGE_LOG
     os.makedirs(os.path.dirname(str(log_path)) or ".", exist_ok=True)
     entry = {
@@ -1212,8 +1269,20 @@ def log_run(root, results):
         "total": results["total"],
         "duration": results["duration"]
     }
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    line = json.dumps(entry) + "\n"
+    try:
+        import fcntl
+        with open(log_path, "a", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(line)
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except ImportError:
+        # Windows: no fcntl. Best-effort append, document as known race.
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
 
 
 # === FLAKY TEST DETECTION ===
