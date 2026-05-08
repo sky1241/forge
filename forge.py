@@ -534,6 +534,47 @@ def _run_git(root, *args):
         return ""
 
 
+def _run_git_full(root, *args, timeout=30, check=False):
+    """Run a git command and return the full CompletedProcess (stdout +
+    stderr + returncode). Use this when callers need to branch on the
+    returncode (e.g. ls-files --error-unmatch returns 0/1, stash returns
+    distinct messages depending on whether anything was stashed). The
+    plain `_run_git` helper only exposes stdout, so call sites that
+    needed `returncode` were dropping the timeout=30 and going to a bare
+    `subprocess.run(["git", ...])` instead — leaving 11 git invocations
+    in bisect_test + get_changed_files without any timeout. A frozen
+    git could hang forge forever. Cycle 4 P2 closes that by routing
+    every direct git call through this helper.
+
+    On TimeoutExpired or FileNotFoundError we return a synthesized
+    CompletedProcess with returncode=124 (timeout) or 127 (not found),
+    matching the conventions /usr/bin/timeout and shell respectively,
+    so callers can detect the failure without separate exception handlers
+    at every site. `check=True` re-raises TimeoutExpired so the caller
+    can decide to abort instead of silently treating it as a non-zero
+    git exit.
+    """
+    try:
+        return subprocess.run(
+            ["git"] + list(args),
+            capture_output=True, text=True,
+            cwd=str(root), encoding="utf-8", errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        if check:
+            raise
+        return subprocess.CompletedProcess(
+            args=["git"] + list(args), returncode=124,
+            stdout="", stderr=f"git timeout after {timeout}s",
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            args=["git"] + list(args), returncode=127,
+            stdout="", stderr="git executable not found",
+        )
+
+
 GIT_NUMSTAT_FORMAT = "COMMIT %H %ae %aI %s"
 
 
@@ -1282,11 +1323,9 @@ def bisect_test(root, test_name):
     # Capture the original ref so we can restore exactly (handles both branches
     # and detached HEAD). 'git checkout -' fails silently if HEAD was already
     # detached, leaving the repo in a wrong state.
-    orig_head = subprocess.run(["git", "symbolic-ref", "-q", "--short", "HEAD"],
-                               capture_output=True, text=True, cwd=str(root)).stdout.strip()
+    orig_head = _run_git_full(root, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
     if not orig_head:
-        orig_head = subprocess.run(["git", "rev-parse", "HEAD"],
-                                   capture_output=True, text=True, cwd=str(root)).stdout.strip()
+        orig_head = _run_git_full(root, "rev-parse", "HEAD").stdout.strip()
 
     # Drop-in pitfall: forge.py is often present at the repo root. If the user
     # committed it, ancestor commits don't have it and `git checkout` deletes
@@ -1299,8 +1338,7 @@ def bisect_test(root, test_name):
         if p.is_file():
             survivors[rel] = p.read_bytes()
     # Stash any uncommitted changes so checkouts succeed cleanly
-    stash_r = subprocess.run(["git", "stash", "--include-untracked", "--quiet"],
-                             cwd=str(root), capture_output=True, text=True)
+    stash_r = _run_git_full(root, "stash", "--include-untracked", "--quiet")
     did_stash = stash_r.returncode == 0 and "No local changes" not in (stash_r.stdout + stash_r.stderr)
 
     def _restore_survivors():
@@ -1310,13 +1348,11 @@ def bisect_test(root, test_name):
                 p.write_bytes(data)
 
     # Find last known good (baseline commit or 20 commits back)
-    try:
-        log = subprocess.run(["git", "log", "--oneline", "-20"],
-                            capture_output=True, text=True, cwd=str(root))
-        commits = [l.split()[0] for l in log.stdout.strip().split("\n") if l.strip()]
-    except Exception:
-        print("  Git not available or not a git repo.")
+    log = _run_git_full(root, "log", "--oneline", "-20")
+    if log.returncode != 0:
+        print(f"  Git not available or not a git repo (exit {log.returncode}).")
         return
+    commits = [l.split()[0] for l in log.stdout.strip().split("\n") if l.strip()]
 
     if len(commits) < 2:
         print("  Not enough commits to bisect.")
@@ -1333,8 +1369,7 @@ def bisect_test(root, test_name):
             commit = commits[mid]
             print(f"    Testing commit {commit}...", end=" ", flush=True)
 
-            subprocess.run(["git", "checkout", commit, "--quiet"], cwd=str(root),
-                           capture_output=True)
+            _run_git_full(root, "checkout", commit, "--quiet")
             _restore_survivors()  # forge.py / .forge may have just been removed
 
             r = subprocess.run(cmd_test, capture_output=True, text=True,
@@ -1356,27 +1391,21 @@ def bisect_test(root, test_name):
         # back by the checkout itself; if not, _restore_survivors() handles it.
         for rel in list(survivors):
             p = root / rel
-            tracked = subprocess.run(
-                ["git", "ls-files", "--error-unmatch", rel],
-                cwd=str(root), capture_output=True
-            ).returncode == 0
+            tracked = _run_git_full(root, "ls-files", "--error-unmatch", rel).returncode == 0
             if p.exists() and not tracked:
                 if p.is_file():
                     p.unlink()
                 else:
                     import shutil as _sh
                     _sh.rmtree(p, ignore_errors=True)
-        subprocess.run(["git", "checkout", orig_head, "--quiet"], cwd=str(root),
-                       capture_output=True)
+        _run_git_full(root, "checkout", orig_head, "--quiet")
         _restore_survivors()
         if did_stash:
-            subprocess.run(["git", "stash", "pop", "--quiet"], cwd=str(root),
-                           capture_output=True)
+            _run_git_full(root, "stash", "pop", "--quiet")
 
     bad_commit = commits[bad_idx]
     # Get commit details
-    detail = subprocess.run(["git", "log", "--oneline", "-1", bad_commit],
-                           capture_output=True, text=True, cwd=str(root))
+    detail = _run_git_full(root, "log", "--oneline", "-1", bad_commit)
 
     bar = "=" * 50
     print(f"\n{bar}")
@@ -1391,22 +1420,20 @@ def bisect_test(root, test_name):
 # === TEST IMPACT ANALYSIS (--fast) ===
 def get_changed_files(root):
     """Get Python files changed since last commit."""
-    try:
-        # Staged + unstaged changes
-        r1 = subprocess.run(["git", "diff", "--name-only", "HEAD"],
-                           capture_output=True, text=True, cwd=str(root))
-        r2 = subprocess.run(["git", "diff", "--name-only", "--cached"],
-                           capture_output=True, text=True, cwd=str(root))
-        r3 = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
-                           capture_output=True, text=True, cwd=str(root))
-        files = set()
-        for r in [r1, r2, r3]:
-            for f in r.stdout.strip().split("\n"):
-                if f.strip().endswith(".py"):
-                    files.add(f.strip())
-        return files
-    except Exception:
-        return set()
+    # All three are git plumbing calls; route through _run_git_full so a
+    # frozen git (e.g. lock contention with another forge instance) can't
+    # hang us forever — timeout=30 each, returncode != 0 ⇒ empty set.
+    r1 = _run_git_full(root, "diff", "--name-only", "HEAD")
+    r2 = _run_git_full(root, "diff", "--name-only", "--cached")
+    r3 = _run_git_full(root, "ls-files", "--others", "--exclude-standard")
+    files = set()
+    for r in [r1, r2, r3]:
+        if r.returncode != 0:
+            continue
+        for f in r.stdout.strip().split("\n"):
+            if f.strip().endswith(".py"):
+                files.add(f.strip())
+    return files
 
 
 def find_impacted_tests(root, changed_files):

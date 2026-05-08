@@ -1334,6 +1334,101 @@ class TestCycle3BisectVerifyTimeout:
         assert "FORGE_TEST_FILTER" in out, f"recovery hint expected:\n{out}"
 
 
+class TestCycle4P2GitTimeouts:
+    """Cycle 4 P2: 11 bare `subprocess.run(["git", ...])` calls in
+    bisect_test + get_changed_files had no timeout. A frozen git (lock
+    contention with another forge instance, NFS hang, etc.) would hang
+    forge forever. P2 routes every direct git call through _run_git_full,
+    which has a default timeout=30 and synthesizes returncode=124 on
+    TimeoutExpired.
+    """
+
+    def test_run_git_full_times_out_cleanly(self, monkeypatch, tmp_path):
+        """When the underlying subprocess.run raises TimeoutExpired,
+        _run_git_full must NOT propagate — it returns a CompletedProcess
+        with returncode=124 so callers can check rc and bail out."""
+        def fake_run(cmd, *a, **kw):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout", 30))
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        r = forge._run_git_full(tmp_path, "log", "--oneline")
+        assert r.returncode == 124
+        assert "timeout" in r.stderr.lower()
+
+    def test_run_git_full_check_true_propagates(self, monkeypatch, tmp_path):
+        """check=True must let TimeoutExpired propagate so a caller that
+        wants hard-fail on git hang can opt in."""
+        def fake_run(cmd, *a, **kw):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout", 30))
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        with pytest.raises(subprocess.TimeoutExpired):
+            forge._run_git_full(tmp_path, "log", check=True)
+
+    def test_run_git_full_no_git_executable(self, monkeypatch, tmp_path):
+        """FileNotFoundError (git not installed) → returncode=127, no
+        propagation. Convention from /usr/bin/timeout."""
+        def fake_run(cmd, *a, **kw):
+            raise FileNotFoundError("git")
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        r = forge._run_git_full(tmp_path, "log")
+        assert r.returncode == 127
+        assert "not found" in r.stderr.lower()
+
+    def test_get_changed_files_survives_git_timeout(self, monkeypatch, tmp_path):
+        """get_changed_files calls 3 git plumbing commands. If any hang,
+        the function must bail out and return an empty set instead of
+        blocking forever. Pre-P2: bare subprocess.run with no timeout."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        # Initialize a real repo so the cwd resolves
+        original_run = subprocess.run
+        original_run(["git", "init", "-q"], cwd=str(repo))
+
+        def fake_run(cmd, *a, **kw):
+            # Only intercept git calls (passthrough other subprocess.run)
+            if cmd and cmd[0] == "git":
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout", 30))
+            return original_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        # Must not hang or raise — returns empty set per the rc != 0 check
+        result = forge.get_changed_files(repo)
+        assert result == set()
+
+    def test_bisect_test_handles_git_log_failure(self, monkeypatch, tmp_path, capsys):
+        """If `git log` itself fails (timeout, weird repo state), bisect
+        must surface a clear message and return — not crash with a Python
+        traceback or hang."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        original_run = subprocess.run
+        original_run(["git", "init", "-q"], cwd=str(repo))
+        original_run(["git", "commit", "--allow-empty", "-m", "init", "-q"], cwd=str(repo))
+
+        # First call (verify): synthesize a "FAILED" output so bisect proceeds.
+        # Second call (symbolic-ref): normal. Third (rev-parse) skipped.
+        # When git log -20 is reached, raise TimeoutExpired.
+        calls = {"n": 0}
+
+        def fake_run(cmd, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # The verify pytest call — synthesize a fail so we proceed
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=1,
+                    stdout="FAILED tests/test_x.py::test_x", stderr="",
+                )
+            if cmd and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "log":
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout", 30))
+            return original_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        forge.bisect_test(repo, "test_x")
+        out = capsys.readouterr().out
+        assert "Git not available" in out or "exit" in out.lower(), (
+            f"bisect must surface git failure cleanly:\n{out}"
+        )
+
+
 class TestCycle3LouvainDeterministic:
     """Bug 4: Louvain partition depended on dict-insertion order of the
     adjacency map. Same import graph → different per-file coupling score
