@@ -773,6 +773,237 @@ def print_modularity_report(root: Path) -> None:
     print(f"{bar}\n")
 
 
+# === KARMA — anti-bullshit audit on commit history (cycle 5 challenge) ===
+#
+# Scores each commit body against its diff using 5 heuristics. Lower = more
+# suspect. The metric isn't proof of bullshit, just a sniff-test that surfaces
+# the patterns the cousin pc1 audit charter Defense 2 (verbatim re-check)
+# was designed to catch:
+#   H1: claims of "Success" / "all green" / "9/9" / "passes" without a
+#       verbatim shell prompt ($ ...) showing the actual command output
+#   H2: predictive language ("expected green", "should be safe", "ought to")
+#       without verbatim proof
+#   H3: "audit complete", "fully tested", "exhaustive" claims without
+#       verbatim run
+#   H4: body mentions .py files that the diff doesn't touch (drift)
+#   H5: body claims a count of tests/files/errors that doesn't match the
+#       repo HEAD state (drift detection — only on numeric claims with
+#       explicit unit suffix like "208 tests" or "73% coverage")
+#
+# Use case: release-gate. Run `forge --karma --since v1.0.4..HEAD` before
+# tagging v1.0.5; if avg_score < cfg threshold, block the release until
+# the suspect commits are reviewed (or admitted as overshoots in the body).
+KARMA_PATTERN_SUCCESS_CLAIM = re.compile(
+    r"\b(Success(?: in)?|all green|9/9|passes?|tests pass|no issues found)\b",
+    re.IGNORECASE,
+)
+KARMA_PATTERN_PREDICTIVE = re.compile(
+    r"\b(expected\s+(?:green|to\s+pass|to\s+work|stable|fine)"
+    r"|should\s+(?:be\s+(?:green|fine|safe|stable)|cover|pass|work|catch|fix|prevent)"
+    r"|ought\s+to|will\s+(?:be\s+)?(?:green|pass|work)"
+    r"|expected\s+on\s+\w+)\b",
+    re.IGNORECASE,
+)
+KARMA_PATTERN_AUDIT = re.compile(
+    r"\b(audit\s+complet(?:e|eness)?|fully\s+tested|exhaustive(?:ly)?)\b",
+    re.IGNORECASE,
+)
+KARMA_PATTERN_VERBATIM = re.compile(r"\$\s+\S")  # `$ command` shell prompt
+KARMA_PATTERN_PY_FILE = re.compile(r"\b([\w/]+\.py)\b")
+
+
+def _karma_iter_commits(
+    root: Path, range_spec: str,
+) -> Iterator[dict[str, Any]]:
+    """Yield {hash, body, files_changed} for each commit in the range.
+
+    Uses two git calls per commit (body + files) instead of a one-shot
+    parse with sentinels. The one-shot approach broke on bodies whose
+    content lines could be confused with file paths (e.g. doc lines
+    mentioning `forge.py`). Robustness over micro-perf — 50 commits ≈
+    ~5s, acceptable for a release-gate command.
+    """
+    hashes_call = _run_git_full(
+        root, "log", range_spec, "--format=%H", timeout=30,
+    )
+    if hashes_call.returncode != 0:
+        return
+    for h in hashes_call.stdout.split("\n"):
+        h = h.strip()
+        if not h or not re.match(r"^[a-f0-9]{40}$", h):
+            continue
+        body_call = _run_git_full(
+            root, "show", "-s", "--format=%B", h, timeout=10,
+        )
+        files_call = _run_git_full(
+            root, "show", "--name-only", "--format=", h, timeout=10,
+        )
+        files = [
+            f.strip() for f in files_call.stdout.split("\n") if f.strip()
+        ]
+        yield {
+            "hash": h, "body": body_call.stdout.strip(),
+            "files_changed": files,
+        }
+
+
+def _karma_score_commit(
+    body: str, files_changed: list[str],
+) -> tuple[float, list[str]]:
+    """6-heuristic score, range [0, 1]. 1.0 = clean, 0.0 = maximum suspect.
+
+    Penalties stack but each fires at most once per commit. Returns
+    (score, reasons) where reasons is a list of human-readable strings.
+    """
+    score = 1.0
+    reasons: list[str] = []
+    has_verbatim = bool(KARMA_PATTERN_VERBATIM.search(body))
+
+    # H1 — claim of success without ANY verbatim proof anywhere in body
+    if KARMA_PATTERN_SUCCESS_CLAIM.search(body) and not has_verbatim:
+        score -= 0.20
+        reasons.append("H1: claim of success/passes without verbatim shell output")
+
+    # H2 — predictive language is ALWAYS suspect, verbatim local doesn't
+    # cover a predicted future state. Cycle 4 G-1 "expected green across
+    # the matrix" had `$ pytest` showing local result + the hand-wave
+    # about CI matrix; CI was actually 6/9 fail. Local verbatim ≠ future
+    # proof.
+    if KARMA_PATTERN_PREDICTIVE.search(body):
+        score -= 0.15
+        reasons.append("H2: predictive claim (expected/should/ought to) about a future state")
+
+    # H3 — audit completeness claim
+    if KARMA_PATTERN_AUDIT.search(body) and not has_verbatim:
+        score -= 0.10
+        reasons.append("H3: audit-completeness claim without verbatim run")
+
+    # H4 — .py file mentioned in body but not in diff (3+ orphan refs)
+    files_in_body = set(KARMA_PATTERN_PY_FILE.findall(body))
+    files_in_diff_basenames = {Path(f).name for f in files_changed if f.endswith(".py")}
+    files_in_diff_full = {f for f in files_changed if f.endswith(".py")}
+    body_only_files = {
+        f for f in files_in_body
+        if Path(f).name not in files_in_diff_basenames
+        and f not in files_in_diff_full
+    }
+    if len(body_only_files) > 2:
+        score -= 0.10
+        reasons.append(
+            f"H4: body mentions {len(body_only_files)} .py file(s) not in diff "
+            f"(e.g. {sorted(body_only_files)[0]})"
+        )
+
+    # H5 — density of exact count claims without verbatim. 3+ unverified
+    # counts in a body that has no `$ command` block = higher overshoot risk.
+    nums = re.findall(r"\b(\d+)\s+(tests?|passed|errors?|files?|LOC|lines?)\b", body)
+    if len(nums) >= 3 and not has_verbatim:
+        score -= 0.10
+        reasons.append(
+            f"H5: {len(nums)} exact count claims without verbatim verification"
+        )
+
+    # H6 — env-specific mypy claim. "mypy --strict Success" without
+    # mentioning mypy 1.X / cross-version / cross-platform means the
+    # claim was tested only on the maintainer's mypy 2.0 / single OS.
+    # Cycle 4 C-B + H6 (B12) hotfix proved this overshoot recurrence.
+    # Exclude bodies that explicitly mention cross-version OR cross-
+    # platform OR mypy 1.X — those commits did the work to cover both.
+    has_mypy_success = bool(re.search(
+        r"\bmypy\b.{0,40}\b(strict|Success|no\s+issues)\b", body, re.IGNORECASE,
+    ))
+    # Word boundaries don't work before `--` (hyphens aren't word chars),
+    # so check the `--platform=` form via plain substring rather than
+    # regex \b. Same for `mypy 1.` (the `.` after digit isn't a word char).
+    has_cross_proof = (
+        "--platform=" in body.lower()
+        or bool(re.search(
+            r"\bmypy\s+1\.|cross[-\s](?:version|platform)|"
+            r"three\s+platforms?|both\s+mypy",
+            body, re.IGNORECASE,
+        ))
+    )
+    if has_mypy_success and not has_cross_proof:
+        score -= 0.15
+        reasons.append(
+            "H6: mypy strict/Success claim without cross-version OR cross-platform "
+            "mention (env-specific overshoot pattern, cf C-B → B12 → H6)"
+        )
+
+    return max(score, 0.0), reasons
+
+
+def measure_karma(root: Path, since: str | None = None) -> dict[str, Any]:
+    """Anti-bullshit audit on commit history.
+
+    Scores each commit body against its diff using 5 heuristics
+    (see KARMA_PATTERN_* and _karma_score_commit). Returns:
+        {n_commits, avg_score, top_suspects (5 lowest, ascending),
+         range_spec_used}.
+
+    Default range = HEAD~50..HEAD when --since is not provided. Pass
+    "v1.0.0..HEAD" or any git rev range explicitly via --since.
+    """
+    range_spec = since if since else "HEAD~50..HEAD"
+    commits = list(_karma_iter_commits(root, range_spec))
+    if not commits:
+        return {
+            "n_commits": 0, "avg_score": 0.0, "top_suspects": [],
+            "range_spec_used": range_spec,
+        }
+    scored: list[dict[str, Any]] = []
+    for c in commits:
+        score, reasons = _karma_score_commit(c["body"], c["files_changed"])
+        # First line of body = subject for display
+        subject = c["body"].split("\n", 1)[0] if c["body"] else "(empty)"
+        scored.append({
+            "hash": c["hash"][:7], "score": score, "reasons": reasons,
+            "subject": subject[:80],
+        })
+    scored.sort(key=lambda x: x["score"])
+    avg_score = sum(c["score"] for c in scored) / len(scored)
+    # Surface every commit with at least one heuristic fired (score < 1.0)
+    # capped at 10. A clean repo shows ≤ 5 suspects; a noisy one wants the
+    # extra slots to surface the long tail.
+    suspects = [c for c in scored if c["score"] < 1.0][:10]
+    return {
+        "n_commits": len(commits), "avg_score": avg_score,
+        "top_suspects": suspects,
+        "n_suspect": sum(1 for c in scored if c["score"] < 1.0),
+        "range_spec_used": range_spec,
+    }
+
+
+def print_karma_report(root: Path, since: str | None = None) -> None:
+    """Human-friendly stdout for `forge --karma`."""
+    result = measure_karma(root, since)
+    bar = "=" * 60
+    print(f"\n{bar}")
+    print(f"  KARMA — anti-bullshit audit on {result['n_commits']} commits")
+    print(f"  Range: {result['range_spec_used']}")
+    print(f"{bar}")
+    if result["n_commits"] == 0:
+        print("  No commits in range (or git error).")
+        return
+    avg = result["avg_score"]
+    if avg >= 0.85:
+        verdict = "high — bodies tend to back claims with verbatim"
+    elif avg >= 0.70:
+        verdict = "medium — some suspect commits, manual review wise"
+    else:
+        verdict = "low — many overshoot patterns; release-gate flag"
+    n_suspect = result.get("n_suspect", len(result["top_suspects"]))
+    print(f"  Avg score    : {avg:.3f}  ({verdict})")
+    print(f"  Suspect commits: {n_suspect} / {result['n_commits']} flagged "
+          f"by ≥1 heuristic")
+    print(f"\n  Showing {len(result['top_suspects'])} lowest-score commits:")
+    for s in result["top_suspects"]:
+        print(f"    {s['score']:.2f}  {s['hash']}  {s['subject']}")
+        for r in s["reasons"]:
+            print(f"           → {r}")
+    print(f"{bar}\n")
+
+
 def _check_dep(name: str, pip_name: str | None = None) -> Any:
     """Try to import optional dependency, return module or None."""
     try:
@@ -3875,6 +4106,7 @@ ANALYTICS
   forge --heatmap                  show per-file failure heatmap
   forge --locate                   Ochiai SBFL fault localization (needs coverage.py)
   forge --modularity               Newman-Girvan Q over the import graph
+  forge --karma [--since RANGE]    anti-bullshit audit on commit history (default HEAD~50..HEAD)
 
 FLAKY / BISECT
   forge --flaky [N]                re-run failing tests N times to classify flaky
@@ -3914,6 +4146,7 @@ KNOWN_FLAGS = {
     # boolean / action flags (no value, or value provided as next non-flag arg)
     "--help", "--version", "--baseline", "--init", "--fast", "--watch", "--full-cycle",
     "--carmack", "--anomaly", "--heatmap", "--locate", "--predict", "--modularity",
+    "--karma", "--since",
     "--snapshot-check", "--diff", "--verbose", "--include-destructive",
     # flags that take a value
     "--bisect", "--add", "--close", "--minimize", "--gen-props",
@@ -4231,6 +4464,21 @@ def main() -> None:
 
     if "--modularity" in args:
         print_modularity_report(root)
+        return
+
+    if "--karma" in args:
+        idx = args.index("--karma")
+        # `--karma` accepts either no value (default range) or an optional
+        # `--since RANGE` immediately after. We also accept the bare positional
+        # form `forge --karma v1.0.0..HEAD` for ergonomic CLI use.
+        since_arg: str | None = None
+        if "--since" in args:
+            sidx = args.index("--since")
+            if sidx + 1 < len(args):
+                since_arg = args[sidx + 1]
+        elif idx + 1 < len(args) and not args[idx + 1].startswith("-"):
+            since_arg = args[idx + 1]
+        print_karma_report(root, since_arg)
         return
 
     if "--watch" in args:

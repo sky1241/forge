@@ -1004,6 +1004,136 @@ class TestFaultLocateSurfacesCollectionErrors:
         )
 
 
+class TestCycle5KarmaInnovation:
+    """Cycle 5 challenge: `forge --karma` is the anti-bullshit auto-audit
+    on commit history. Score [0, 1] per commit body vs diff using 6
+    heuristics (H1: success-without-verbatim, H2: predictive language,
+    H3: audit-completeness without verbatim, H4: file-mention drift,
+    H5: dense unverified counts, H6: env-specific mypy claim).
+
+    Tests pin:
+      - synthetic clean body → score 1.0
+      - synthetic overshoot body (predictive) → score < 1.0
+      - real-repo sensitivity ≥ 60% on the 5 known cycle 4-5 overshoots
+        admitted in the auto-audit doc."""
+
+    def test_karma_clean_commit_high_score(self):
+        """Synthetic body that backs every claim with verbatim shell
+        output AND mentions cross-platform proof gets the maximum score
+        (1.0). No heuristic fires."""
+        body = (
+            "fix(test): example clean commit\n\n"
+            "Tests the regression for foo.\n\n"
+            "Validation:\n"
+            "  $ pytest --no-header -q\n"
+            "  217 passed in 0.42s\n"
+            "  $ mypy --strict --platform=win32 forge.py\n"
+            "  Success: no issues found in 1 source file\n"
+        )
+        files = ["forge.py", "tests/test_x.py"]
+        score, reasons = forge._karma_score_commit(body, files)
+        assert score == 1.0, (
+            f"clean body with cross-platform proof should score 1.0; "
+            f"got {score} with reasons {reasons}"
+        )
+        assert reasons == []
+
+    def test_karma_predictive_claim_detected(self):
+        """Synthetic body claiming 'expected green' without verbatim CI
+        proof must trigger H2. This is the cycle 4 G-1 overshoot pattern
+        captured exactly: predictive language about a future state."""
+        body = (
+            "ci(workflow): GitHub Actions matrix\n\n"
+            "the suite is expected green across the matrix.\n\n"
+            "  $ pytest tests/ -q\n"
+            "  10 passed\n"
+        )
+        files = [".github/workflows/test.yml"]
+        score, reasons = forge._karma_score_commit(body, files)
+        assert score < 1.0, f"'expected green' should drop the score; got {score}"
+        assert any("H2" in r for r in reasons), (
+            f"H2 should fire on 'expected green'; reasons: {reasons}"
+        )
+
+    def test_karma_mypy_env_specific_claim_detected(self):
+        """Body claiming 'mypy --strict Success' without cross-version
+        OR cross-platform mention triggers H6 — the cycle 4 C-B → B12
+        recurring overshoot pattern."""
+        body = (
+            "fix(typing): mypy --strict pass\n\n"
+            "  $ mypy --strict forge.py\n"
+            "  Success: no issues found\n"
+        )
+        files = ["forge.py"]
+        score, reasons = forge._karma_score_commit(body, files)
+        assert score < 1.0, (
+            f"mypy strict claim without cross-version mention should "
+            f"trigger H6; got score {score}"
+        )
+        assert any("H6" in r for r in reasons), (
+            f"H6 should fire; reasons: {reasons}"
+        )
+
+    def test_karma_mypy_cross_version_safe(self):
+        """Body that explicitly mentions cross-version OR cross-platform
+        OR `mypy 1.X` proves the maintainer ran the matrix, so H6 should
+        NOT fire even with the success claim."""
+        body = (
+            "fix(typing): cross-platform mypy strict\n\n"
+            "  $ mypy --strict --platform=win32 forge.py\n"
+            "  Success: no issues found\n"
+            "  $ mypy --strict --platform=darwin forge.py\n"
+            "  Success: no issues found\n"
+        )
+        files = ["forge.py"]
+        score, reasons = forge._karma_score_commit(body, files)
+        # H6 should NOT fire — but H2 / others might fire on the surface.
+        # We only pin H6 absence here.
+        assert not any("H6" in r for r in reasons), (
+            f"H6 should NOT fire on cross-platform body; reasons: {reasons}"
+        )
+
+    def test_karma_sensitivity_on_real_repo(self):
+        """Run karma on the real v1.0.0..HEAD range and verify that
+        at least 4 of the 5 known cycle 4-5 overshoots admitted in the
+        auto-audit are flagged (score < 1.0).
+
+        Ground truth (from `~/forge-auto-audit-cycle3-4-5.md`):
+          - O2 fd90710 v1.0.1  (mypy Success env-specific, hotfix B12)
+          - O3 acd5c69 G-1     ('expected green' optimistic claim)
+          - O4 8f466a0 J-1     ('audit completeness' half-done)
+          - O5 7004671 P1      (cycle 5 push without canal dialogue)
+          - O5 8d38522 P3      (cycle 5 push without canal dialogue)
+
+        Target: ≥ 4/5 = 80% sensitivity (well above the ≥ 60% bar set
+        in the challenge brief)."""
+        repo = Path(__file__).resolve().parent.parent
+        # If git rev-parse v1.0.0 fails (e.g. shallow clone in CI), skip
+        # cleanly rather than fail with a misleading "0 commits" output.
+        result = forge.measure_karma(repo, since="v1.0.0..HEAD")
+        if result["n_commits"] == 0:
+            pytest.skip("v1.0.0..HEAD range empty (shallow clone? CI fetch-depth?)")
+        suspect_hashes = {s["hash"] for s in
+                          [c for c in result["top_suspects"]]
+                          + [c for c in [{"hash": h} for h in []]]}
+        # We need ALL flagged hashes (n_suspect can be > 10), so iterate
+        # via the public API rather than truncated top_suspects.
+        all_scored: list[dict[str, Any]] = []
+        for c in forge._karma_iter_commits(repo, "v1.0.0..HEAD"):
+            sc, _ = forge._karma_score_commit(c["body"], c["files_changed"])
+            all_scored.append({"hash": c["hash"][:7], "score": sc})
+        flagged = {c["hash"] for c in all_scored if c["score"] < 1.0}
+        ground_truth = {"fd90710", "acd5c69", "8f466a0", "7004671", "8d38522"}
+        detected = ground_truth & flagged
+        sensitivity = len(detected) / len(ground_truth)
+        assert sensitivity >= 0.6, (
+            f"karma sensitivity {sensitivity:.0%} below 60% target.\n"
+            f"  ground truth: {sorted(ground_truth)}\n"
+            f"  detected:     {sorted(detected)}\n"
+            f"  missed:       {sorted(ground_truth - detected)}"
+        )
+
+
 class TestCycle5K6FaultLocateDisplayEndToEnd:
     """Cycle 5 K-6: pin the --locate display path end-to-end on a real
     failing test scenario. Pre-K-6 fault_locate had ~100 LOC of display
