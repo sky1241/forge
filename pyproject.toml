@@ -34,6 +34,12 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+# `forge --mutate` requires libcst (AST-aware mutation backend, cycle 4 D-3b).
+# All other forge subcommands work without it — keep the install footprint
+# minimal for users who only need --baseline / --predict / --carmack / etc.
+mutate = [
+    "libcst>=1.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-timeout>=2.0",

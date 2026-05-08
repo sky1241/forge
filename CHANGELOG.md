@@ -6,6 +6,24 @@ All notable changes to forge are documented here. Format follows
 
 ## [Unreleased]
 
+### BREAKING — Cycle 4 D-3b (2026-05-08)
+- **Mutation backend is now libcst (AST-aware) only.** The regex
+  backend was removed after D-3b runtime validation showed 23.4%
+  invalid mutants on real repos (filelock, attrs, mistune;
+  100/427 mutants were `SyntaxError`-only "kills") vs 0/133 for
+  libcst. See [`docs/D3B_RUNTIME_VALIDATION.md`](docs/D3B_RUNTIME_VALIDATION.md).
+- **`FORGE_MUTATION_BACKEND` env var removed.** It selected
+  between `auto` / `libcst` / `regex`; with regex gone there's
+  nothing to switch. If the var is set in user CI scripts, it's
+  ignored silently.
+- **`forge --mutate` requires libcst.** libcst is an OPTIONAL
+  runtime dependency to keep the install footprint small for
+  the ~80% of users who don't run `--mutate`. Install via
+  `pip install 'forge-shield[mutate]'`. Without it,
+  `forge --mutate` exits cleanly with an install-message rather
+  than a stack trace. All other forge subcommands work without
+  libcst.
+
 ### Added — Cycle 4 (2026-05-08)
 - **Type hints** on every top-level function (64 + 4 nested) — `mypy --strict`
   passes on both mypy 1.20.x and 2.0. Test `tests/test_typing.py` enforces

@@ -2584,89 +2584,30 @@ def gen_props(root: Path, module_path: str, include_destructive: bool = False) -
     print(f"      `git stash` first if you've never run gen-props on this repo.")
 
 
-# === AXE 3: MUTATION TESTING — Pure Python engine (DeMillo 1978, Offutt 1996) ===
-# 5 sufficient mutation operators: AOR, ROR, LCR, UOI, SDL (Offutt 1996)
-MUTATION_OPS = [
-    # AOR — Arithmetic Operator Replacement
-    (r'(?<!=)\+(?!=)', '-', 'AOR'),
-    (r'(?<!=)-(?!=)', '+', 'AOR'),
-    (r'(?<!/)\*(?!\*)', '/', 'AOR'),
-    (r'(?<!\*)/', '*', 'AOR'),
-    # ROR — Relational Operator Replacement
-    (r'==', '!=', 'ROR'),
-    (r'!=', '==', 'ROR'),
-    (r'<=', '>', 'ROR'),
-    (r'>=', '<', 'ROR'),
-    (r'(?<!<)(?<!>)(?<!=)>(?!=)', '<', 'ROR'),
-    (r'(?<!<)(?<!>)(?<!!)(?<!>)<(?!=)', '>', 'ROR'),
-    # LCR — Logical Connector Replacement
-    (r'\band\b', 'or', 'LCR'),
-    (r'\bor\b', 'and', 'LCR'),
-    (r'\bnot\b', '', 'LCR'),
-    # UOI — Unary Operator Insertion (True/False swap)
-    (r'\bTrue\b', 'False', 'UOI'),
-    (r'\bFalse\b', 'True', 'UOI'),
-    # SDL — Statement Deletion (return None instead of value)
-    (r'return (.+)', 'return None', 'SDL'),
-]
-
-
-def _generate_mutants_regex(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
-    """Regex-based mutation generator (legacy backend).
-
-    Yields (line_no, op_name, original, mutated, full_source).
-
-    Cycle 4 D-3a: this is now the FALLBACK backend. The default backend
-    is `_generate_mutants_libcst` (AST-aware), which avoids the 8.8% of
-    invalid mutants the regex approach produces (`->` arrow muté en
-    `+>`, `*unpacking` muté en `/`, `return X` inside string literals
-    truncating the string — see docs/D3_LIBCST_PRESCAN.md).
-
-    Override via `FORGE_MUTATION_BACKEND=regex` to force this path even
-    when libcst is installed. Used automatically when libcst can't be
-    imported (e.g. minimal CI venv without dev deps).
-    """
-    source = source_path.read_text(encoding="utf-8", errors="replace")
-    lines = source.split("\n")
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        # Skip comments, blank lines, decorators, imports, docstrings
-        if not stripped or stripped.startswith("#") or stripped.startswith("@") or \
-           stripped.startswith("import ") or stripped.startswith("from ") or \
-           stripped.startswith('"""') or stripped.startswith("'''"):
-            continue
-        for pattern, replacement, op_name in MUTATION_OPS:
-            match = re.search(pattern, line)
-            if match:
-                mutated_line = line[:match.start()] + replacement + line[match.end():]
-                if mutated_line != line:
-                    mutated_source = "\n".join(lines[:i] + [mutated_line] + lines[i+1:])
-                    yield (i + 1, op_name, line.strip(), mutated_line.strip(), mutated_source)
-
-
-# === D-3a: libcst AST-aware mutator ===
-# The libcst backend operates on the parsed AST instead of the raw source.
-# Pre-cycle-4 D-3 prescan measured the regex backend at 8.8% invalid mutants
-# (256/2894) — mostly `->` arrow annotations the regex aliases as arithmetic
-# operators, *unpacking aliased as multiplication, and `return X` patterns
-# inside string literals that truncate the literal. libcst sees the actual
-# AST and skips all three by construction.
+# === AXE 3: MUTATION TESTING — libcst-based engine (DeMillo 1978, Offutt 1996) ===
+# 5 sufficient mutation operators: AOR, ROR, LCR, UOI, SDL (Offutt 1996),
+# implemented over libcst's AST so every mutant is syntactically valid by
+# construction. Cycle 4 D-3 measured the previous regex backend at 23.4%
+# invalid mutants on real repos (filelock, attrs, mistune); see
+# docs/D3B_RUNTIME_VALIDATION.md for the comparison numbers.
 #
-# When libcst isn't importable (minimal venv, optional dep), forge falls back
-# to _generate_mutants_regex with a printed notice. Override via env var
-# FORGE_MUTATION_BACKEND={auto,libcst,regex}; default `auto` prefers libcst.
+# libcst is an OPTIONAL runtime dependency (cycle 4 D-3b Option β):
+# `pip install forge-shield[mutate]`. Without it, `forge --mutate` exits
+# with a clear "install forge[mutate]" message; all other forge subcommands
+# work without libcst.
 
 # AST node-class swap tables (operator → its dual). Each candidate matches
 # a class in one of these maps; the mutant is the same node with operator
-# replaced by an instance of the swap class.
+# replaced by an instance of the swap class. Lazily populated on first
+# call to _generate_mutants() so forge.py imports cleanly without libcst.
 _AOR_SWAP: dict[type, type] = {}
 _ROR_SWAP: dict[type, type] = {}
 _LCR_SWAP: dict[type, type] = {}
 
 
 def _ensure_libcst_swap_maps() -> None:
-    """Lazy-init the libcst swap maps. Called from the libcst backend so
-    forge.py imports cleanly without libcst installed."""
+    """Lazy-init the libcst swap maps. forge.py imports without libcst;
+    the maps are populated on first call to `_generate_mutants`."""
     global _AOR_SWAP, _ROR_SWAP, _LCR_SWAP
     if _AOR_SWAP:
         return
@@ -2684,18 +2625,21 @@ def _ensure_libcst_swap_maps() -> None:
     _LCR_SWAP = {_cst.And: _cst.Or, _cst.Or: _cst.And}
 
 
-def _generate_mutants_libcst(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
-    """libcst (AST-aware) mutation generator.
+def _generate_mutants(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
+    """Generate mutants for `source_path` via libcst (AST-aware).
 
-    Walks the parsed module to find all mutable sites (BinaryOperation,
-    Comparison, BooleanOperation, Name "True"/"False", Return). For each
-    site, yields one mutant by rebuilding the tree with that single node
-    swapped. By construction every mutant is a syntactically valid Python
-    module — the 8.8% of invalid mutants the regex backend produces vanish.
+    Walks the parsed module to find all mutable sites (BinaryOperation for
+    AOR, Comparison for ROR, BooleanOperation for LCR, Name "True"/"False"
+    for UOI, Return for SDL). For each site, yields one mutant by rebuilding
+    the tree with that single node swapped.
 
-    The OneShot transformer is defined inline as a closure so libcst stays
-    a runtime-optional dep (importing libcst here is the only place this
-    function references it; `forge.py` imports cleanly without libcst).
+    Yields (line_no, op_name, original_text, mutated_text, full_source).
+    Every mutant's full_source is parseable as a Python module — the 23.4%
+    invalid-mutant noise of the previous regex backend (cycle 4 D-3) is
+    eliminated by construction.
+
+    Raises ImportError if libcst isn't installed. Caller (run_mutation)
+    catches and surfaces as a clean "install forge[mutate]" message.
     """
     import libcst as cst
     from libcst.metadata import PositionProvider
@@ -2838,41 +2782,6 @@ def _generate_mutants_libcst(source_path: Path) -> Iterator[tuple[int, str, str,
         yield (line, kind, orig_text, mut_text, mutated_tree.code)
 
 
-def _generate_mutants(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
-    """Dispatch to the libcst (AST-aware) backend by default; fall back to
-    the regex backend when libcst isn't installed.
-
-    Override via env var FORGE_MUTATION_BACKEND:
-      auto    (default) prefer libcst, fall back to regex if libcst absent
-      libcst  hard-require libcst, raise if missing
-      regex   force regex backend regardless of libcst availability
-    """
-    backend = os.environ.get("FORGE_MUTATION_BACKEND", "auto").lower()
-    if backend == "regex":
-        print("  mutation backend: regex (FORGE_MUTATION_BACKEND=regex override)")
-        yield from _generate_mutants_regex(source_path)
-        return
-    if backend not in ("auto", "libcst"):
-        print(f"  WARNING: unknown FORGE_MUTATION_BACKEND={backend!r}, "
-              f"falling back to auto")
-        backend = "auto"
-    try:
-        import libcst  # noqa: F401
-    except ImportError:
-        if backend == "libcst":
-            raise RuntimeError(
-                "FORGE_MUTATION_BACKEND=libcst requires libcst — "
-                "install with `pip install libcst` or `pip install forge-shield[dev]`."
-            )
-        print("  mutation backend: regex (libcst not installed; "
-              "`pip install libcst` for AST-aware mutator)")
-        yield from _generate_mutants_regex(source_path)
-        return
-    print("  mutation backend: libcst (AST-aware; "
-          "set FORGE_MUTATION_BACKEND=regex to fall back)")
-    yield from _generate_mutants_libcst(source_path)
-
-
 def _try_one_mutant(
     src: Path, original: str, mut_source: str,
     test_paths: list[str], root: Path, timeout: int,
@@ -2917,8 +2826,14 @@ def _try_one_mutant(
 def run_mutation(
     root: Path, target_file: str | None = None, cfg: dict[str, Any] | None = None,
 ) -> float | None:
-    """Pure-Python mutation testing. No external deps. Offutt 1996: 5 operators suffice.
+    """Mutation testing via libcst (AST-aware). Offutt 1996: 5 operators suffice.
     Mutation score = killed / total. Target: >80%."""
+    try:
+        import libcst  # noqa: F401
+    except ImportError:
+        print("  ERROR: --mutate requires libcst (AST-aware mutation backend).")
+        print("  Install with: pip install 'forge-shield[mutate]'")
+        return None
     # Find target files
     if target_file:
         target = Path(target_file)
@@ -2976,6 +2891,7 @@ def run_mutation(
     print(f"  per-mutant timeout: {mutant_timeout}s ({timeout_src}; "
           f"override via FORGE_MUTATE_TIMEOUT=N or "
           f"mutation_per_target_timeout_seconds in .forge/config.json)")
+    print("  mutation backend: libcst (AST-aware)")
 
     killed = 0
     survived = 0
