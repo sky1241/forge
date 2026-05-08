@@ -116,6 +116,39 @@ FORGE_CONFIG_DEFAULTS = {
     "bisect_iteration_timeout_seconds": 120,
     "impacted_tests_timeout_seconds": 300,
     "snapshot_command_timeout_seconds": 60,
+    # Cycle 4 P6: cousin pc1 audit caught 5 inline magic literals that
+    # P1 missed (it focused on already-declared keys). Centralizing here
+    # so .forge/config.json can tune them without forking forge.py.
+    # Composite predict score weights (Nagappan 2005 metric mix). Sum
+    # to 1.0; the ratios reflect the author's prior on which signals
+    # matter most for bug-proneness. Override the whole dict to change
+    # the scoring policy.
+    "predict_weights": {
+        "churn": 0.20, "freq": 0.20, "burst": 0.15, "authors": 0.10,
+        "bugfix": 0.15, "loc": 0.05, "recency": 0.15,
+    },
+    # Hamming severity labels for surviving mutants. >= severe → "SEVERE",
+    # >= moderate (and < severe) → "moderate", below → "minor". Tuning
+    # the thresholds adjusts the noise level of the mutate report.
+    "hamming_severe_threshold": 5,
+    "hamming_moderate_threshold": 2,
+    # Ochiai SBFL label thresholds. Score > highly_suspect → "highly
+    # suspect", > suspect → "suspect", below → "low". Lower the cutoffs
+    # on noisy suites where Ochiai converges on small numbers.
+    "ochiai_highly_suspect_threshold": 0.7,
+    "ochiai_suspect_threshold": 0.4,
+    # CARMACK composite score weights (Kalman + Wavelet + Crash + Coupling
+    # + Churn). Sum to 1.0; not empirically validated, override to bias
+    # the ranking toward the signal that best fits your repo's bug shape.
+    "carmack_composite_weights": {
+        "kalman": 0.25, "wavelet": 0.20, "crash": 0.25,
+        "coupling": 0.15, "churn": 0.15,
+    },
+    # In --full-cycle, files smaller than this LOC are routed through
+    # `--mutate` automatically. Bigger files require the user to invoke
+    # `--mutate <path>` explicitly, since mutation testing on a 2k-line
+    # file can take hours. Bumped or lowered per repo discipline.
+    "full_cycle_small_file_loc_threshold": 200,
 }
 
 
@@ -1719,8 +1752,8 @@ def predict_defects(root, weeks=None):
             rng = maxs[k] - mins[k]
             metrics[f][k + "_n"] = (metrics[f][k] - mins[k]) / rng if rng > 0 else 0.0
 
-    # Composite risk score
-    w = PREDICT_WEIGHTS
+    # Composite risk score (weights cycle4-P6 routed through cfg).
+    w = cfg["predict_weights"]
     for f in metrics:
         m = metrics[f]
         metrics[f]["risk"] = (w["churn"] * m["churn_n"] + w["freq"] * m["freq_n"] +
@@ -2503,7 +2536,12 @@ def run_mutation(root, target_file=None, cfg=None):
             else:
                 survived += 1
                 sev = _hamming_severity(orig_line, mut_line)
-                sev_label = "SEVERE" if sev >= 5 else "moderate" if sev >= 2 else "minor"
+                if sev >= cfg["hamming_severe_threshold"]:
+                    sev_label = "SEVERE"
+                elif sev >= cfg["hamming_moderate_threshold"]:
+                    sev_label = "moderate"
+                else:
+                    sev_label = "minor"
                 survivors.append(
                     f"L{line_no} [{op}] {orig_line} -> {mut_line}  "
                     f"(Hamming={sev}, {sev_label})"
@@ -2701,8 +2739,15 @@ def fault_locate(root):
     print(f"  FAULT LOCALIZATION — Ochiai SBFL")
     print(f"  {total_failed} failing test(s), {len(passed_tests)} passing")
     print(f"{bar}")
+    high_t = cfg["ochiai_highly_suspect_threshold"]
+    med_t = cfg["ochiai_suspect_threshold"]
     for s in suspects[:top_n]:
-        label = "highly suspect" if s["score"] > 0.7 else "suspect" if s["score"] > 0.4 else "low"
+        if s["score"] > high_t:
+            label = "highly suspect"
+        elif s["score"] > med_t:
+            label = "suspect"
+        else:
+            label = "low"
         # Try to show the actual source line
         src_line = ""
         fpath = root / s["file"]
@@ -2887,14 +2932,16 @@ def predict_carmack(root, weeks=None):
 
     # Composite Carmack score (heuristic weights, sum to 1.0).
     # NOTE: weights are not validated empirically — they reflect the relative
-    # importance the author assigns to each signal. Tune on your repo if needed.
+    # importance the author assigns to each signal. Override via
+    # .forge/config.json `carmack_composite_weights` to tune per repo.
+    cw = cfg["carmack_composite_weights"]
     for i, r in enumerate(results):
         r["score"] = (
-            0.25 * kalman_n[i] +
-            0.20 * wave_n[i] +
-            0.25 * crash_n[i] +
-            0.15 * coupling_n[i] +
-            0.15 * churn_n[i]
+            cw["kalman"] * kalman_n[i] +
+            cw["wavelet"] * wave_n[i] +
+            cw["crash"] * crash_n[i] +
+            cw["coupling"] * coupling_n[i] +
+            cw["churn"] * churn_n[i]
         )
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -3126,6 +3173,8 @@ def _watch_iteration(root, last_hash):
 def full_cycle(root):
     """Run the full forge pipeline: predict -> mutate -> gen-props -> test -> flaky -> locate.
     Each step feeds the next. Stops early if nothing to do."""
+    cfg = _load_forge_config(root)
+    small_file_threshold = cfg["full_cycle_small_file_loc_threshold"]
     bar = "=" * 50
     print(f"\n{bar}")
     print(f"  FORGE FULL CYCLE")
@@ -3149,7 +3198,7 @@ def full_cycle(root):
         p = root / f
         if p.exists():
             loc = len(p.read_text(encoding="utf-8", errors="replace").splitlines())
-            if loc <= 200:
+            if loc <= small_file_threshold:
                 small_sources.append(f)
             else:
                 print(f"  [2/8] skip {f} ({loc} lines — use --mutate directly for big files)")
