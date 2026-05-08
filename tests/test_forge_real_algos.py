@@ -2962,6 +2962,13 @@ class TestCycle4P8AtomicWriteAndLock:
         assert len(lines) == 1
         json.loads(lines[0])
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="fcntl is POSIX-only; Windows log_run is best-effort no-op "
+               "(msvcrt.locking has byte-range semantics, not file-level — "
+               "deferred). The race this test guards against is impossible "
+               "to prevent on Windows with stdlib only.",
+    )
     def test_log_run_concurrent_writes_keep_line_integrity(self, tmp_path):
         """Multi-thread concurrent log_run: every line in the final log
         must be valid JSON. Pre-P8 (no fcntl): possible interleaved
