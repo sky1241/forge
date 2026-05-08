@@ -583,9 +583,20 @@ class TestRunTestsTracksPerTestNames:
         """Cousin pc1 cycle 3 finding (loguru audit): the cycle 2.5 fix used
         \\S+ for the whole test id, which silently dropped any parametrized
         test whose id contained a space — e.g. ``[8 B]``, ``[hello world]``.
-        On loguru that hid 180 / 1597 tests (11.3%) from the swap detector,
-        the exact "silent lie" pattern the cycle 2.5 fix was supposed to
-        kill. The body must accept arbitrary content inside [...]."""
+
+        Cousin pc1 originally measured **180 / 1597 tests** missed (~11.3%)
+        on loguru; the d4b90f3 commit body cites a separate measurement of
+        **90 / 1465** (~6.1%) on a different snapshot of the same repo
+        (later head, slightly different parametrize id mix). Both numbers
+        come from the same root cause and are recoverable by the new
+        regex; the cycle 4 P5 commit notes the discordance so the audit
+        trail stays honest. The exact recovery percentage depends on
+        which parametrized tests with spaced ids were present at the
+        moment the measurement was taken.
+
+        The behavior assertion below is what matters: spaces, special
+        chars, multi-word ids inside ``[...]`` must round-trip through
+        the parser intact regardless of mix."""
         out = (
             "tests/test_size.py::test_rotation[8 B] PASSED                    [ 10%]\n"
             "tests/test_size.py::test_rotation[1 KB] PASSED                   [ 20%]\n"

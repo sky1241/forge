@@ -80,9 +80,13 @@ BUGFIX_KEYWORDS = ("fix", "bug", "patch", "repair", "crash")
 
 # Default values for every user-tunable knob. Override any of them by
 # writing `.forge/config.json` in the repo, e.g. `{"predict_horizon_weeks":
-# 12, "test_runner_timeout_seconds": 900}`. Read once at startup via
-# _load_forge_config(root); each subcommand asks the helper instead of
-# referring to a magic literal in its own body.
+# 12, "test_runner_timeout_seconds": 900}`. Each subcommand calls
+# _load_forge_config(root) at its entry point and reads the keys it
+# needs as cfg["..."]. The TestCycle3ForgeConfig
+# .test_every_cfg_key_wired_or_explicit_optout suite test enforces that
+# every key declared here is actually consumed somewhere in forge.py —
+# pre-cycle4-P1 ten of them were declarative-only ("21 magic numbers
+# centralized" was a half-truth), the lock test prevents that regression.
 FORGE_CONFIG_DEFAULTS = {
     # Mutation testing (Offutt 1996)
     "mutation_threshold_pct": MUTATION_THRESHOLD,  # kill rate to PASS
@@ -506,12 +510,18 @@ def _modularity_contribution(graph):
                 s += w - (degree[n] * degree[m]) / two_m
         contrib[n] = s / two_m if two_m > 0 else 0.0
 
-    # Normalize to [0, 1] by max absolute contribution.
-    # Negative contribs (bridge files) → 0; high-contribs (binders) → 1.
-    max_abs = max((c for c in contrib.values()), default=0.0)
-    if max_abs <= 0:
+    # Normalize positive contribs to [0, 1] by the max POSITIVE contribution.
+    # Negative contribs (bridge files that hurt cluster modularity) are
+    # clamped to 0 — they're "not binders" but we don't penalize them past
+    # zero. So the divisor is `max(c)` not `max(abs(c))`: if every contrib
+    # were negative, max ≤ 0 → all scores become 0 (handled below).
+    # Variable kept as `max_pos` for clarity (was misleadingly named
+    # `max_abs` when the comment claimed an `abs` that the code never did
+    # — cousin pc1 cycle 4 P5 drift fix).
+    max_pos = max((c for c in contrib.values()), default=0.0)
+    if max_pos <= 0:
         return {f: 0.0 for f in graph}
-    return {f: max(contrib.get(f, 0.0), 0.0) / max_abs for f in graph}
+    return {f: max(contrib.get(f, 0.0), 0.0) / max_pos for f in graph}
 
 
 def _check_dep(name, pip_name=None):
