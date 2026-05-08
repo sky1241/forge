@@ -348,13 +348,13 @@ class TestDestructiveDetector:
     def test_scrub_pattern_caught(self):
         """The canonical case: scrub_secrets() name pattern -> flagged."""
         node, src = self._parse_func("def scrub_secrets(target_path, dry_run=True): pass")
-        is_destr, reason = forge._is_destructive_function(node, src)
+        is_destr, reason = forge._is_destructive_function(node)
         assert is_destr
         assert "scrub_" in reason
 
     def test_install_pattern_caught(self):
         node, src = self._parse_func("def install_hooks(repo_path): pass")
-        is_destr, _ = forge._is_destructive_function(node, src)
+        is_destr, _ = forge._is_destructive_function(node)
         assert is_destr
 
     def test_pure_compute_safe(self):
@@ -363,7 +363,7 @@ class TestDestructiveDetector:
             "def compute_score(a: int, b: int) -> int:\n"
             "    return a * b + 1"
         )
-        is_destr, reason = forge._is_destructive_function(node, src)
+        is_destr, reason = forge._is_destructive_function(node)
         assert not is_destr, f"unexpectedly flagged: {reason}"
 
     def test_write_text_call_caught(self):
@@ -372,7 +372,7 @@ class TestDestructiveDetector:
             "def innocent_name(data, out):\n"
             "    out.write_text(data)"
         )
-        is_destr, reason = forge._is_destructive_function(node, src)
+        is_destr, reason = forge._is_destructive_function(node)
         assert is_destr
         assert "write_text" in reason
 
@@ -383,7 +383,7 @@ class TestDestructiveDetector:
             "    import subprocess\n"
             "    subprocess.run(cmd)"
         )
-        is_destr, _ = forge._is_destructive_function(node, src)
+        is_destr, _ = forge._is_destructive_function(node)
         assert is_destr
 
     def test_open_write_mode_caught(self):
@@ -393,7 +393,7 @@ class TestDestructiveDetector:
             "    f = open(path, 'w')\n"
             "    f.close()"
         )
-        is_destr, reason = forge._is_destructive_function(node, src)
+        is_destr, reason = forge._is_destructive_function(node)
         assert is_destr
         assert "open" in reason
 
@@ -404,27 +404,27 @@ class TestDestructiveDetector:
             "    for root, dirs, files in repo_path.walk():\n"
             "        pass"
         )
-        is_destr, reason = forge._is_destructive_function(node, src)
+        is_destr, reason = forge._is_destructive_function(node)
         assert is_destr
         assert "walk" in reason
 
     def test_hook_suffix_caught(self):
         """Anything ending in _hook is side-effecting by convention."""
         node, src = self._parse_func("def my_session_hook(payload): pass")
-        is_destr, reason = forge._is_destructive_function(node, src)
+        is_destr, reason = forge._is_destructive_function(node)
         assert is_destr
         assert "_hook" in reason
 
     def test_send_pattern_caught(self):
         """Network sender -> flagged."""
         node, src = self._parse_func("def send_email(to, body): pass")
-        is_destr, _ = forge._is_destructive_function(node, src)
+        is_destr, _ = forge._is_destructive_function(node)
         assert is_destr
 
     def test_run_progressive_levels_caught(self):
         """The exact function that triggered our skip earlier in this session."""
         node, src = self._parse_func("def run_progressive_levels(file_path, content): pass")
-        is_destr, reason = forge._is_destructive_function(node, src)
+        is_destr, reason = forge._is_destructive_function(node)
         assert is_destr
         assert "run_" in reason
 

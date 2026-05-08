@@ -61,7 +61,11 @@ BASELINE_FILE = f"{FORGE_DIR}/baseline.json"
 REPORT_FILE = f"{FORGE_DIR}/last_report.json"
 FORGE_LOG = f"{FORGE_DIR}/forge_log.txt"
 FLAKY_FILE = f"{FORGE_DIR}/flaky.json"
-HEATMAP_FILE = f"{FORGE_DIR}/heatmap.json"
+# HEATMAP_FILE was declared here for a future show_heatmap save target
+# that never materialized — show_heatmap reads .forge/log.jsonl directly
+# and never writes a separate heatmap.json. Removed in cycle 4 P7 (was:
+# HEATMAP_FILE = f"{FORGE_DIR}/heatmap.json"). If a future caller wants
+# to persist heatmap output, add the constant back at that point.
 SNAPSHOT_DIR = f"{FORGE_DIR}/snapshots"
 MUTATION_THRESHOLD = 80
 PREDICT_WEIGHTS = {"churn": 0.20, "freq": 0.20, "burst": 0.15,
@@ -2041,7 +2045,7 @@ _PATH_LIKE_ARG_NAMES = {
 }
 
 
-def _is_destructive_function(node, source_text):
+def _is_destructive_function(node):
     """Return (is_destructive, reason) for an ast.FunctionDef node.
 
     Heuristics (any-of):
@@ -2050,6 +2054,12 @@ def _is_destructive_function(node, source_text):
          (write_text, rmtree, subprocess.run, etc.).
       3. Function takes a path-like argument AND its body opens any file in
          write mode (open(..., 'w')) or appends.
+
+    Note (cycle 4 P7): the second positional `source_text` parameter
+    that this function accepted before was never read inside the body
+    — pure dead arg shipped from an early version that contemplated
+    text-pattern fallbacks alongside the AST scan. Removed to align
+    the signature with the actual contract.
     """
     name = node.name
 
@@ -2130,7 +2140,7 @@ def gen_props(root, module_path, include_destructive=False):
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
             # Filter destructive functions BEFORE generating any test
-            is_destr, reason = _is_destructive_function(node, source)
+            is_destr, reason = _is_destructive_function(node)
             if is_destr and not include_destructive:
                 skipped_destructive.append((node.name, reason))
                 continue

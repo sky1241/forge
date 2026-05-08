@@ -44,7 +44,7 @@ def scrub_secrets(target_path, dry_run=False):
     pass
 """
     node = _build_node(forge, src, "scrub_secrets")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert is_destr, "scrub_* must be detected as destructive"
     assert "scrub_" in reason
 
@@ -55,14 +55,14 @@ def install_hooks(repo_path):
     pass
 """
     node = _build_node(forge, src, "install_hooks")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, _ = forge._is_destructive_function(node)
     assert is_destr
 
 
 def test_purge_function_skipped_by_name(forge):
     src = "def purge_secrets_db(repo_path): pass"
     node = _build_node(forge, src, "purge_secrets_db")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, _ = forge._is_destructive_function(node)
     assert is_destr
 
 
@@ -77,7 +77,7 @@ def test_generate_password_hash_not_skipped(forge):
     Earlier versions over-flagged it via the ^generate_ pattern."""
     src = "def generate_password_hash(password, method='sha256'): return hashlib.sha256(password.encode()).hexdigest()"
     node = _build_node(forge, src, "generate_password_hash")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert not is_destr, f"pure compute helper should not be flagged; reason={reason}"
 
 
@@ -86,7 +86,7 @@ def test_bootstrap_init_function_not_skipped(forge):
     no FS writes — must not be flagged."""
     src = "def bootstrap_app(config): app = Flask(__name__); return app"
     node = _build_node(forge, src, "bootstrap_app")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert not is_destr, f"pure init should not be flagged; reason={reason}"
 
 
@@ -99,7 +99,7 @@ def test_generate_with_real_write_still_caught(forge):
         "    out.write_text('<html></html>')\n"
     )
     node = _build_node(forge, src, "generate_report")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert is_destr
     assert "write_text" in reason
 
@@ -110,14 +110,14 @@ def test_strip_url_with_str_replace_not_skipped(forge):
     actually Path.replace() for renaming files)."""
     src = "def strip_url(url): return url.replace('http://', 'https://')"
     node = _build_node(forge, src, "strip_url")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert not is_destr, f"str.replace() is pure; reason={reason}"
 
 
 def test_hook_suffix_skipped(forge):
     src = "def session_end_hook(payload): pass"
     node = _build_node(forge, src, "session_end_hook")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, _ = forge._is_destructive_function(node)
     assert is_destr
 
 
@@ -132,7 +132,7 @@ def innocent_name(data, where):
     p.write_text(data)
 """
     node = _build_node(forge, src, "innocent_name")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert is_destr, f"write_text() must be detected, got {reason!r}"
     assert "write_text" in reason
 
@@ -144,7 +144,7 @@ def harmless(cmd):
     subprocess.run(cmd, shell=True)
 """
     node = _build_node(forge, src, "harmless")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert is_destr
     assert "run" in reason
 
@@ -156,7 +156,7 @@ def harmless(path, content):
         f.write(content)
 """
     node = _build_node(forge, src, "harmless")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert is_destr
 
 
@@ -167,7 +167,7 @@ def harmless(d):
     shutil.rmtree(d)
 """
     node = _build_node(forge, src, "harmless")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, _ = forge._is_destructive_function(node)
     assert is_destr
 
 
@@ -180,7 +180,7 @@ def innocent(repo_path):
         pass
 """
     node = _build_node(forge, src, "innocent")
-    is_destr, reason = forge._is_destructive_function(node, src)
+    is_destr, reason = forge._is_destructive_function(node)
     assert is_destr, "walk on path-like arg must be detected"
 
 
@@ -190,7 +190,7 @@ def innocent(repo_path):
 def test_pure_string_function_not_skipped(forge):
     src = "def add(a, b): return a + b"
     node = _build_node(forge, src, "add")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, _ = forge._is_destructive_function(node)
     assert not is_destr
 
 
@@ -202,7 +202,7 @@ def redact_secrets_text(text):
     return re.sub(r'TOKEN', '[REDACTED]', text)
 """
     node = _build_node(forge, src, "redact_secrets_text")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, _ = forge._is_destructive_function(node)
     assert not is_destr
 
 
@@ -214,7 +214,7 @@ def count_chained_commands(text):
     return text.count('&&') + text.count('||')
 """
     node = _build_node(forge, src, "count_chained_commands")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, _ = forge._is_destructive_function(node)
     assert not is_destr
 
 
@@ -227,7 +227,7 @@ def clamp_chained_commands(text, max_chains=30):
     return text, False
 """
     node = _build_node(forge, src, "clamp_chained_commands")
-    is_destr, _ = forge._is_destructive_function(node, src)
+    is_destr, _ = forge._is_destructive_function(node)
     assert not is_destr
 
 
