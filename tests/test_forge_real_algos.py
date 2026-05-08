@@ -3259,9 +3259,11 @@ class TestCycle5P1PathsToMutate:
     def test_paths_to_mutate_nonexistent_file_rejected(
         self, monkeypatch, tmp_path, capsys,
     ):
-        """`--paths-to-mutate <missing>` exits non-zero with a clear
-        "file not found" error — fail-fast at the boundary instead of
-        running run_mutation and getting "No Python files to mutate"."""
+        """`--paths-to-mutate <missing>` exits with usage-error code 2
+        (CLI convention; cycle 5 K-2 / B20). Pre-K-2 used exit 1, which
+        is reserved for "command ran but failed" (e.g. mutation score
+        below threshold). A non-existent path is a boundary typo, same
+        class as `forge --frobulate` → exit 2."""
         monkeypatch.setattr(forge, "find_repo_root", lambda: tmp_path)
         monkeypatch.setattr(
             sys, "argv",
@@ -3269,7 +3271,7 @@ class TestCycle5P1PathsToMutate:
         )
         with pytest.raises(SystemExit) as exc:
             forge.main()
-        assert exc.value.code == 1
+        assert exc.value.code == 2
         out = capsys.readouterr().out
         assert "file not found" in out
         assert "does_not_exist.py" in out

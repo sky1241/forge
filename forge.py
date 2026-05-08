@@ -4179,14 +4179,18 @@ def main() -> None:
             if not ptm_path.is_absolute():
                 ptm_path = root / ptm_path
             if not ptm_path.exists():
+                # Cycle 5 K-2 (B20): exit 2 = usage error (CLI convention),
+                # not 1 (which is reserved for "command ran but failed",
+                # e.g. mutation score below threshold). A non-existent path
+                # is a typo at the boundary, same class as `--frobulate`.
                 print(f"  ERROR: --paths-to-mutate file not found: {_safe_path(ptm_path)}")
-                sys.exit(1)
+                sys.exit(2)
             try:
                 ptm_path.resolve().relative_to(root.resolve())
             except ValueError:
                 print(f"  ERROR: --paths-to-mutate must point to a file inside the repo: "
                       f"{_safe_path(ptm_path)}")
-                sys.exit(1)
+                sys.exit(2)
             target = str(ptm_path)
         cfg = _load_forge_config(root)
         score = run_mutation(root, target, cfg=cfg)
