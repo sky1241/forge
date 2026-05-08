@@ -54,6 +54,29 @@ pip install 'forge-shield[all]'      # everything above
 - **Fault localization** (`--locate`) — Ochiai SBFL formula over `coverage.py` data.
 - **Delta debugging** (`--minimize`) — ddmin (Zeller 2002) to shrink failing inputs.
 
+### All subcommands
+
+| Sub-command | What it does |
+|---|---|
+| `forge` | Run tests vs baseline |
+| `forge --baseline` | Snapshot the suite |
+| `forge --predict` | Rank files by churn-based defect risk |
+| `forge --carmack` | Multi-signal risk score |
+| `forge --mutate` | Mutation testing |
+| `forge --locate` | Ochiai SBFL fault localization |
+| `forge --gen-props` | Hypothesis property tests |
+| `forge --bisect TEST` | Bisect a failing test back to its commit |
+| `forge --flaky [N]` | Run tests N times to find flaky |
+| `forge --snapshot CMD` | Capture command output as golden |
+| `forge --snapshot-check` | Diff against goldens |
+| `forge --add "DESC"` | Log a bug in BUGS.md |
+| `forge --close BUG-ID` | Mark a bug fixed |
+| `forge --watch` | Auto re-run on file change |
+| `forge --fast` | Run only impacted tests |
+| `forge --full-cycle` | Run the full pipeline |
+
+`forge --help` for the complete flag list and examples; `forge --version` to print the installed version.
+
 ## Optional features
 
 | Feature | Extra | Backend |
