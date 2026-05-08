@@ -352,13 +352,19 @@ def _kaplan_meier(observations: list[tuple[float, bool]] | list[float]) -> list[
     """
     if not observations:
         return [(0.0, 1.0)]
-    # Legacy shape: list of floats -> treat as all-events. After this branch,
-    # narrowed to list[tuple[float, bool]] for the rest of the function.
-    obs_typed: list[tuple[float, bool]]
-    if observations and not isinstance(observations[0], tuple):
-        obs_typed = [(t, True) for t in observations]
-    else:
-        obs_typed = list(observations)  # type: ignore[arg-type]
+    # Normalize the legacy shape: list[float] -> list[tuple[float, True]].
+    # Per-element isinstance narrowing works across mypy 1.X and 2.X — both
+    # versions accept the per-iteration narrowing while a single-element
+    # isinstance check on observations[0] only narrows the first element
+    # (mypy 1.X catches that, mypy 2.X is more lenient). One uniform loop
+    # avoids the cross-version disagreement that the cousin pc1 ↔ sky-master
+    # canal flagged on commit 6225dd9.
+    obs_typed: list[tuple[float, bool]] = []
+    for raw in observations:
+        if isinstance(raw, tuple):
+            obs_typed.append(raw)
+        else:
+            obs_typed.append((float(raw), True))
 
     # Sort by time, with events processed before censorings at same t
     obs = sorted(obs_typed, key=lambda x: (x[0], 0 if x[1] else 1))
