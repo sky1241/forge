@@ -323,7 +323,12 @@ def _louvain_clustering(adj, max_iter=20, tol=1e-7):
     adj : {node: {neighbor: weight}}, undirected, symmetric.
     Returns (partition, q) where partition = {node: community_id}.
     """
-    nodes = list(adj.keys())
+    # Deterministic node order. Without sorting, the partition depended on
+    # the dict-insertion order of `adj`, which itself depended on the
+    # caller's iteration order over the import graph (filesystem order on
+    # cold runs, dict ordering on warm runs). Same repo → different
+    # partition → different per-file coupling score in --carmack across runs.
+    nodes = sorted(adj.keys())
     if not nodes:
         return {}, 0.0
     partition = {n: i for i, n in enumerate(nodes)}
@@ -389,10 +394,13 @@ def _modularity_contribution(graph):
     """
     if not graph:
         return {}
-    # Build undirected weighted adjacency
-    adj = {f: {} for f in graph}
-    for src, targets in graph.items():
-        for tgt in targets:
+    # Build undirected weighted adjacency in a deterministic order so that
+    # downstream Louvain (which depends on insertion order for tie-breaking)
+    # produces the same partition on every run.
+    adj = {f: {} for f in sorted(graph)}
+    for src in sorted(graph):
+        targets = graph[src]
+        for tgt in sorted(targets):
             if tgt not in adj:
                 adj[tgt] = {}
             adj[src][tgt] = adj[src].get(tgt, 0.0) + 1.0
@@ -548,7 +556,21 @@ def find_tests(root):
         # "bench" in its name.
         excludes += [f"{os.sep}bench{os.sep}", f"{os.sep}benchmarks{os.sep}"]
     tests = [t for t in tests if not any(x in str(t) for x in excludes)]
-    return sorted(set(tests))
+    # Dedupe by resolved absolute path so a symlinked test isn't counted
+    # twice (pathlib's Path equality is path-string based, not inode-based;
+    # a symlink and its target are two different Path objects).
+    seen_resolved = set()
+    deduped = []
+    for t in tests:
+        try:
+            key = t.resolve()
+        except (OSError, RuntimeError):
+            key = t.absolute()
+        if key in seen_resolved:
+            continue
+        seen_resolved.add(key)
+        deduped.append(t)
+    return sorted(deduped)
 
 
 def run_tests(root, verbose=False):
@@ -928,6 +950,14 @@ def close_bug(root, bug_id):
         print(f"  No {BUGS_FILE} found")
         return
 
+    # Accept the digit-only shorthand (`forge --close 1`) and normalize it to
+    # `BUG-001`. Without this the regex below silently failed to match and
+    # printed "1 not found or already closed" — confusing UX on a tool that
+    # itself prints bug ids as `BUG-XXX`.
+    bug_id = bug_id.upper().strip()
+    if bug_id.isdigit():
+        bug_id = f"BUG-{int(bug_id):03d}"
+
     content = bugs_path.read_text(encoding="utf-8")
     pattern = f"(## {bug_id}:.*?\\n- \\*\\*Status\\*\\*: )OPEN"
     new_content = re.sub(pattern, f"\\1FIXED ({datetime.now().strftime('%Y-%m-%d')})", content)
@@ -1089,8 +1119,14 @@ def bisect_test(root, test_name):
     k_expr = _combine_k_filter(_get_test_filter(), test_name)
     cmd_test = [sys.executable, "-m", "pytest", "-x", "-q", "--tb=line",
                 "--no-header", "-k", k_expr]
-    result = subprocess.run(cmd_test, capture_output=True, text=True,
-                           cwd=str(root), encoding="utf-8", errors="replace")
+    try:
+        result = subprocess.run(cmd_test, capture_output=True, text=True,
+                                cwd=str(root), encoding="utf-8", errors="replace",
+                                timeout=120)
+    except subprocess.TimeoutExpired:
+        print(f"  Verify step exceeded 120s. Set FORGE_TEST_FILTER to narrow "
+              f"the slice or run pytest manually first.")
+        return
     if "failed" not in result.stdout.lower() and "error" not in result.stdout.lower():
         print(f"  {test_name} is not currently failing. Nothing to bisect.")
         return
@@ -2220,9 +2256,12 @@ def run_mutation(root, target_file=None):
             continue
         print(f"  {src.name}: {len(mutants)} mutants", end="", flush=True)
         for line_no, op, orig_line, mut_line, mut_source in mutants:
-            # Apply mutant
-            src.write_text(mut_source, encoding="utf-8")
+            # Apply mutant inside the try so the finally branch always runs
+            # — even if write_text itself raises (disk full, permission flip
+            # mid-loop). Otherwise the source could be left half-written
+            # without a restore.
             try:
+                src.write_text(mut_source, encoding="utf-8")
                 r = subprocess.run(
                     [sys.executable, "-m", "pytest"] + test_paths +
                     ["-x", "-q", "--tb=no", "--no-header"],
@@ -3112,20 +3151,35 @@ def main():
         print("  Watching for changes... (Ctrl+C to stop)")
         last_hash = ""
         while True:
-            # Hash all .py files
-            h = hashlib.md5()
-            for f in sorted(root.rglob("*.py")):
-                if ".forge" not in str(f) and "__pycache__" not in str(f):
-                    h.update(f.read_bytes())
-            current = h.hexdigest()
-            if current != last_hash:
-                last_hash = current
-                os.system("cls" if os.name == "nt" else "clear")
-                results = run_tests(root)
-                baseline = load_json(str(root / BASELINE_FILE))
-                print_report(results, baseline)
-                log_run(root, results)
-                save_json(str(root / REPORT_FILE), results)
+            try:
+                # Hash all .py files. read_bytes() may race with editor saves
+                # (file removed/moved between rglob and read) — skip those.
+                h = hashlib.md5()
+                for f in sorted(root.rglob("*.py")):
+                    if ".forge" in str(f) or "__pycache__" in str(f):
+                        continue
+                    try:
+                        h.update(f.read_bytes())
+                    except (OSError, FileNotFoundError):
+                        continue
+                current = h.hexdigest()
+                if current != last_hash:
+                    last_hash = current
+                    os.system("cls" if os.name == "nt" else "clear")
+                    results = run_tests(root)
+                    baseline = load_json(str(root / BASELINE_FILE))
+                    print_report(results, baseline)
+                    log_run(root, results)
+                    save_json(str(root / REPORT_FILE), results)
+            except KeyboardInterrupt:
+                print("\n  --watch stopped.")
+                return
+            except Exception as e:
+                # Don't kill the loop on a transient pytest crash or I/O
+                # glitch. Surface, sleep, retry. Without this guard the loop
+                # died silently on the first hiccup and the user only noticed
+                # when their test status went stale.
+                print(f"  --watch error (continuing): {type(e).__name__}: {e}")
             time.sleep(2)
         return
 
@@ -3136,8 +3190,17 @@ def main():
     print_report(results, baseline)
 
     if "--baseline" in args:
-        save_json(str(root / BASELINE_FILE), results)
-        print(f"  Baseline saved: {results['passed']} passed, {results['failed']} failed")
+        # Refuse to freeze a 0/0/0 baseline — it would mask later regressions
+        # silently (the diff comparator would have nothing to diff against
+        # and report PASS forever). Common cause: forge invoked from a dir
+        # where find_tests can't see anything (wrong cwd, missing testpaths).
+        if results.get("total", 0) == 0:
+            print("  REFUSING baseline: 0 tests collected — would mask future "
+                  "regressions. Check cwd, FORGE_TEST_FILTER, "
+                  "[tool.pytest.ini_options] testpaths.")
+        else:
+            save_json(str(root / BASELINE_FILE), results)
+            print(f"  Baseline saved: {results['passed']} passed, {results['failed']} failed")
 
     # Always save report + log
     os.makedirs(str(root / FORGE_DIR), exist_ok=True)
