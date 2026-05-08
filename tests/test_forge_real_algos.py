@@ -575,6 +575,43 @@ class TestRunTestsTracksPerTestNames:
         for s, ids in by_status.items():
             assert ids == set(), f"{s} should be empty, got {ids}"
 
+    def test_per_test_parser_handles_params_with_spaces(self):
+        """Cousin pc1 cycle 3 finding (loguru audit): the cycle 2.5 fix used
+        \\S+ for the whole test id, which silently dropped any parametrized
+        test whose id contained a space — e.g. ``[8 B]``, ``[hello world]``.
+        On loguru that hid 180 / 1597 tests (11.3%) from the swap detector,
+        the exact "silent lie" pattern the cycle 2.5 fix was supposed to
+        kill. The body must accept arbitrary content inside [...]."""
+        out = (
+            "tests/test_size.py::test_rotation[8 B] PASSED                    [ 10%]\n"
+            "tests/test_size.py::test_rotation[1 KB] PASSED                   [ 20%]\n"
+            "tests/test_x.py::TestC::test_y[hello world] FAILED               [ 30%]\n"
+            "tests/test_x.py::test_z[a b c d] XFAIL (flaky)                   [ 40%]\n"
+            "tests/test_x.py::test_w[multi word param] ERROR                  [ 50%]\n"
+            "tests/test_x.py::test_q[option_a] PASSED                         [ 60%]\n"
+            "tests/test_x.py::test_q[\xfeQ] PASSED                            [ 70%]\n"
+            "tests/test_x.py::test_plain SKIPPED                              [ 80%]\n"
+        )
+        by_status = forge._parse_pytest_per_test_status(out)
+        assert by_status["PASSED"] == {
+            "tests/test_size.py::test_rotation[8 B]",
+            "tests/test_size.py::test_rotation[1 KB]",
+            "tests/test_x.py::test_q[option_a]",
+            "tests/test_x.py::test_q[\xfeQ]",
+        }, f"PASSED set wrong: {by_status['PASSED']}"
+        assert by_status["FAILED"] == {
+            "tests/test_x.py::TestC::test_y[hello world]",
+        }, f"FAILED set wrong: {by_status['FAILED']}"
+        assert by_status["XFAIL"] == {
+            "tests/test_x.py::test_z[a b c d]",
+        }, f"XFAIL set wrong: {by_status['XFAIL']}"
+        assert by_status["ERROR"] == {
+            "tests/test_x.py::test_w[multi word param]",
+        }, f"ERROR set wrong: {by_status['ERROR']}"
+        assert by_status["SKIPPED"] == {
+            "tests/test_x.py::test_plain",
+        }
+
     def test_print_report_surfaces_passed_to_failed_flip(self, capsys):
         """The hidden-regression case: same total counts, but one test
         flipped passed→failed. Old forge said 'PASS', new must say

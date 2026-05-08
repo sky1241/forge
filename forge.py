@@ -687,9 +687,13 @@ def _parse_pytest_per_test_status(output):
         "XFAIL": set(), "XPASS": set(), "ERROR": set(),
     }
     # Test ID looks like "path/file.py::test_name" possibly with ::class::test
-    # or [param]. Anchor at line start so we don't pick up text inside tracebacks.
+    # and an optional [param] tail. The [...] CAN contain spaces (e.g.
+    # "[8 B]", "[hello world]") so we can't use \S+ for the whole thing —
+    # that silently dropped any parametrized test whose id contained a space.
+    # Body parts exclude '[' so the optional bracket group is what consumes it.
     pattern = re.compile(
-        r"^(\S+(?:::\S+)+)\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS|ERROR)\b"
+        r"^([^\s\[]+(?:::[^\s\[]+)+(?:\[[^\]\n]*\])?)"
+        r"\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS|ERROR)\b"
     )
     for line in output.split("\n"):
         m = pattern.match(line)
