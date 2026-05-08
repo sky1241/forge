@@ -45,7 +45,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 import ast
 import math
 
@@ -352,12 +352,16 @@ def _kaplan_meier(observations: list[tuple[float, bool]] | list[float]) -> list[
     """
     if not observations:
         return [(0.0, 1.0)]
-    # Legacy shape: list of floats -> treat as all-events
+    # Legacy shape: list of floats -> treat as all-events. After this branch,
+    # narrowed to list[tuple[float, bool]] for the rest of the function.
+    obs_typed: list[tuple[float, bool]]
     if observations and not isinstance(observations[0], tuple):
-        observations = [(t, True) for t in observations]
+        obs_typed = [(t, True) for t in observations]
+    else:
+        obs_typed = list(observations)  # type: ignore[arg-type]
 
     # Sort by time, with events processed before censorings at same t
-    obs = sorted(observations, key=lambda x: (x[0], 0 if x[1] else 1))
+    obs = sorted(obs_typed, key=lambda x: (x[0], 0 if x[1] else 1))
     n_at_risk = len(obs)
     survival = 1.0
     curve = [(0.0, 1.0)]
@@ -394,7 +398,7 @@ def _km_survival_at(curve: list[tuple[float, float]], horizon: float) -> float:
     return s
 
 
-def _dtw_distance(seq_a: list[float], seq_b: list[float]) -> float:
+def _dtw_distance(seq_a: Sequence[float], seq_b: Sequence[float]) -> float:
     """Dynamic Time Warping distance (speech recognition).
     Compares temporal patterns of test results."""
     n, m = len(seq_a), len(seq_b)
@@ -694,7 +698,7 @@ def _iter_numstat_commits(raw_log: str) -> Iterator[dict[str, Any]]:
     and the AXE-3 trend analysis. They all derived their per-file stats from
     the same underlying record shape, just accumulated differently.
     """
-    cur = None
+    cur: dict[str, Any] | None = None
     for line in raw_log.split("\n"):
         if line.startswith("COMMIT "):
             if cur is not None:
@@ -758,7 +762,8 @@ def _read_pyproject_pytest_options(root: Path) -> dict[str, Any]:
             data = tomllib.load(f)
     except Exception:
         return {}
-    return data.get("tool", {}).get("pytest", {}).get("ini_options", {})
+    options: dict[str, Any] = data.get("tool", {}).get("pytest", {}).get("ini_options", {})
+    return options
 
 
 def _read_pyproject_norecursedirs(root: Path) -> list[str]:
@@ -861,9 +866,11 @@ def run_tests(root: Path, verbose: bool = False) -> dict[str, Any]:
     cmd = [sys.executable, "-m", "pytest"]
     cmd.extend([test_target] if isinstance(test_target, str) else test_target)
     cmd.extend(["-v", "--tb=short"])
-    # --timeout requires pytest-timeout; skip if not installed (silent crash otherwise)
+    # --timeout requires pytest-timeout; skip if not installed (silent crash otherwise).
+    # Optional dep without a published type stub — `# type: ignore[import-not-found]`
+    # silences mypy strict; runtime is protected by the try/except ImportError.
     try:
-        import pytest_timeout  # noqa: F401
+        import pytest_timeout  # type: ignore[import-not-found]  # noqa: F401
         cmd.append(f"--timeout={cfg['pytest_per_test_timeout_seconds']}")
     except ImportError:
         pass
@@ -1463,9 +1470,14 @@ def bisect_test(root: Path, test_name: str) -> None:
     # any) with the user-provided test_name via AND, so a noisy target repo
     # with pre-existing failures stays narrowed to the slice the user picked.
     print(f"  Verifying {test_name} currently fails...")
+    # _combine_k_filter only returns None when BOTH args are None; here
+    # `test_name` is guaranteed non-empty by the signature, so the result is
+    # always a non-empty str. The assert narrows for mypy and protects the
+    # subprocess.run calls below from receiving None in cmd_test.
     k_expr = _combine_k_filter(_get_test_filter(), test_name)
-    cmd_test = [sys.executable, "-m", "pytest", "-x", "-q", "--tb=line",
-                "--no-header", "-k", k_expr]
+    assert k_expr is not None
+    cmd_test: list[str] = [sys.executable, "-m", "pytest", "-x", "-q", "--tb=line",
+                           "--no-header", "-k", k_expr]
     try:
         result = subprocess.run(cmd_test, capture_output=True, text=True,
                                 cwd=str(root), encoding="utf-8", errors="replace",
@@ -1817,7 +1829,7 @@ def predict_defects(root: Path, weeks: int | None = None) -> None:
     raw_log = _fetch_numstat_log(root, weeks)
 
     # Parse git log into per-file metrics
-    file_stats = {}
+    file_stats: dict[str, dict[str, Any]] = {}
     for f in files:
         p = root / f
         loc = len(p.read_text(encoding="utf-8", errors="replace").splitlines()) if p.exists() else 1
@@ -1837,7 +1849,7 @@ def predict_defects(root: Path, weeks: int | None = None) -> None:
                     s["bugfixes"] += 1
 
     # Compute raw metrics per file
-    metrics = {}
+    metrics: dict[str, dict[str, Any]] = {}
     # Minimum LOC threshold to avoid the loc=1 churn artefact.
     # Cousin pc1 cycle 2 finding (confirmed across scrapy + pytest cycles): empty
     # __init__.py or 1-line stub files report loc=1; with even a single 1-line
@@ -1911,7 +1923,7 @@ def predict_defects(root: Path, weeks: int | None = None) -> None:
 
 
 # === AXE 6: FLAKY CLASSIFICATION (Luo et al. 2014, Parry 2021) ===
-FLAKY_PATTERNS = {
+FLAKY_PATTERNS: dict[str, dict[str, Any]] = {
     "Async Wait": {"patterns": ["time.sleep", "asyncio.sleep", "await ", "async "],
                    "fix": "Use explicit retry/poll or mock time"},
     "Concurrency": {"patterns": ["threading.", "multiprocessing.", "concurrent.", "Lock("],
@@ -2274,7 +2286,7 @@ def gen_props(root: Path, module_path: str, include_destructive: bool = False) -
     # `from module import *` so picking them up would produce NameError at
     # test runtime. Also capture return annotation to disambiguate filter-vs-
     # tuple return functions.
-    functions = []
+    functions: list[dict[str, Any]] = []
     skipped_destructive = []
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
@@ -2284,7 +2296,7 @@ def gen_props(root: Path, module_path: str, include_destructive: bool = False) -
                 skipped_destructive.append((node.name, reason))
                 continue
             # Extract arg names and annotations
-            args = []
+            args: list[dict[str, Any]] = []
             for arg in node.args.args:
                 ann = None
                 if arg.annotation:
@@ -2861,7 +2873,7 @@ def fault_locate(root: Path) -> None:
         return False
 
     # Build suspiciousness scores per line
-    suspects = []
+    suspects: list[dict[str, Any]] = []
     for src_file in cd.measured_files():
         # Skip test files
         basename = Path(src_file).name
@@ -2876,7 +2888,12 @@ def fault_locate(root: Path) -> None:
             display = src_file
 
         for line_no, ctx_set in contexts_by_line.items():
-            if not ctx_set or ctx_set == {''}:
+            # Cycle 4 C-B Bug A — coverage.data.contexts_by_lineno returns
+            # dict[int, list[str]], so the original check `ctx_set == {''}`
+            # (set literal) was *never* True at runtime. mypy strict caught
+            # the non-overlapping comparison. Fixed to list literal so the
+            # "single empty context" branch actually skips as intended.
+            if not ctx_set or ctx_set == ['']:
                 continue
 
             f_count = sum(1 for ctx in ctx_set if _match_test(ctx, failed_tests))
@@ -2950,7 +2967,7 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
 
     raw_log = _fetch_numstat_log(root, weeks)
 
-    file_stats = {}
+    file_stats: dict[str, dict[str, Any]] = {}
     for f in files:
         p = root / f
         loc = len(p.read_text(encoding="utf-8", errors="replace").splitlines()) if p.exists() else 1
@@ -2996,7 +3013,7 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
         baseline_ts = 0.0
         now_ts = 0.0
 
-    results = []
+    results: list[dict[str, Any]] = []
     for f, s in file_stats.items():
         if not s["commits"]:
             continue
@@ -3156,7 +3173,7 @@ def anomaly_detect(root: Path, weeks: int | None = None) -> list[dict[str, Any]]
 
     raw_log = _fetch_numstat_log(root, weeks)
 
-    file_stats = {}
+    file_stats: dict[str, dict[str, Any]] = {}
     for f in files:
         p = root / f
         loc = len(p.read_text(encoding="utf-8", errors="replace").splitlines()) if p.exists() else 1
@@ -3203,7 +3220,7 @@ def anomaly_detect(root: Path, weeks: int | None = None) -> list[dict[str, Any]]
         stds[k] = std if std > 0 else 1.0
 
     z_threshold = cfg["carmack_zscore_threshold"]
-    anomalies = []
+    anomalies: list[dict[str, Any]] = []
     for i, (f, m) in enumerate(zip(active_files, metrics_list)):
         z_scores = {}
         flags = 0
