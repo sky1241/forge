@@ -704,15 +704,15 @@ class TestFindTestsHonorsTestPaths:
         (tmp_path / "testing" / "test_in_testing.py").write_text("def test_b(): pass\n")
         # Without testpaths config: both visible
         files = forge.find_tests(tmp_path)
-        assert any("tests/test_in_tests.py" in str(f) for f in files)
-        assert any("testing/test_in_testing.py" in str(f) for f in files)
+        assert any("tests/test_in_tests.py" in f.as_posix() for f in files)
+        assert any("testing/test_in_testing.py" in f.as_posix() for f in files)
         # With testpaths=['testing']: only testing/* visible
         (tmp_path / "pyproject.toml").write_text(
             '[tool.pytest.ini_options]\ntestpaths = ["testing"]\n',
             encoding="utf-8",
         )
         files = forge.find_tests(tmp_path)
-        names = [str(f) for f in files]
+        names = [f.as_posix() for f in files]
         assert any("testing/test_in_testing.py" in n for n in names)
         assert not any("tests/test_in_tests.py" in n for n in names), \
             f"tests/ must be filtered out when testpaths=['testing']: {names}"
@@ -739,7 +739,7 @@ class TestFindTestsHonorsNoRecursedirs:
             encoding="utf-8",
         )
         files = forge.find_tests(tmp_path)
-        names = [str(f) for f in files]
+        names = [f.as_posix() for f in files]
         assert any("tests/test_real.py" in n for n in names), \
             f"real test must be picked: {names}"
         assert not any("example_scripts/test_skip_me.py" in n for n in names), \
@@ -751,7 +751,7 @@ class TestFindTestsHonorsNoRecursedirs:
         (tmp_path / "tests" / "test_a.py").write_text("def test_a(): pass\n")
         # No pyproject.toml at all — must not crash, must return tests
         files = forge.find_tests(tmp_path)
-        assert any("test_a.py" in str(f) for f in files)
+        assert any("test_a.py" in f.as_posix() for f in files)
 
 
 class TestGenPropsNoSysPathPollution:
@@ -1026,7 +1026,7 @@ class TestFindTestsExcludesBenchmarks:
         monkeypatch.delenv("FORGE_INCLUDE_BENCHMARKS", raising=False)
         self._make_test_layout(tmp_path)
         files = forge.find_tests(tmp_path)
-        names = [str(f) for f in files]
+        names = [f.as_posix() for f in files]
         assert any("tests/test_real.py" in n for n in names), \
             f"real test must be picked: {names}"
         assert not any("bench/test_benchmarks.py" in n for n in names), \
@@ -1039,7 +1039,7 @@ class TestFindTestsExcludesBenchmarks:
         self._make_test_layout(tmp_path)
         monkeypatch.setenv("FORGE_INCLUDE_BENCHMARKS", "1")
         files = forge.find_tests(tmp_path)
-        names = [str(f) for f in files]
+        names = [f.as_posix() for f in files]
         assert any("bench/test_benchmarks.py" in n for n in names)
         assert any("benchmarks/test_b.py" in n for n in names)
 
@@ -1053,7 +1053,7 @@ class TestFindTestsExcludesBenchmarks:
         (tmp_path / "subench").mkdir()
         (tmp_path / "subench" / "test_y.py").write_text("def test_y(): pass\n")
         files = forge.find_tests(tmp_path)
-        names = [str(f) for f in files]
+        names = [f.as_posix() for f in files]
         # 'benchmark' as part of a filename should NOT trigger the exclude
         assert any("test_benchmark_helpers.py" in n for n in names), \
             f"file with 'benchmark' in its name kept: {names}"
@@ -1337,7 +1337,9 @@ class TestCycle3BisectVerifyTimeout:
     def test_bisect_verify_step_has_timeout(self, monkeypatch, tmp_path, capsys):
         repo = tmp_path / "repo"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+        _git_init(repo)  # sets user.email + user.name so `git commit` doesn't
+                         # exit 128 ("Author identity unknown") on a fresh CI
+                         # runner where git has no global config.
         subprocess.run(["git", "commit", "--allow-empty", "-m", "init", "-q"],
                        cwd=str(repo), check=True)
 
@@ -1432,6 +1434,10 @@ class TestCycle4P2GitTimeouts:
         repo.mkdir()
         original_run = subprocess.run
         original_run(["git", "init", "-q"], cwd=str(repo))
+        # Set user config explicitly: fresh CI runners have no global git
+        # config, so `git commit` would exit 128 ("Author identity unknown").
+        original_run(["git", "config", "user.email", "t@t"], cwd=str(repo))
+        original_run(["git", "config", "user.name", "t"], cwd=str(repo))
         original_run(["git", "commit", "--allow-empty", "-m", "init", "-q"], cwd=str(repo))
 
         # First call (verify): synthesize a "FAILED" output so bisect proceeds.
