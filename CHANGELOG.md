@@ -6,6 +6,16 @@ All notable changes to forge are documented here. Format follows
 
 ## [Unreleased]
 
+_Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
+
+## [1.0.0] - 2026-05-08
+
+First public PyPI release. Bundles the full cycle 4 work — type hints
+on every top-level function, libcst-based mutation backend, granular
+install extras, CLI validator, atomic JSON writes, and a documented
+matrix of subcommand → extra mappings. Suite at 205 default + 1 slow,
+mypy `--strict` passes the entire codebase.
+
 ### Added — Cycle 4 E-2 (2026-05-08)
 - **Granular install extras** in `pyproject.toml`:
   - `forge-shield[mutate]` → libcst (`forge --mutate`, AST-aware backend)
@@ -137,4 +147,5 @@ All notable changes to forge are documented here. Format follows
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/sky1241/forge/releases/tag/v1.0.0
