@@ -3116,6 +3116,58 @@ DOCS
 """
 
 
+KNOWN_FLAGS = {
+    # short flags
+    "-h", "-v",
+    # boolean / action flags (no value, or value provided as next non-flag arg)
+    "--help", "--baseline", "--init", "--fast", "--watch", "--full-cycle",
+    "--carmack", "--anomaly", "--heatmap", "--locate", "--predict",
+    "--snapshot-check", "--diff", "--verbose", "--include-destructive",
+    # flags that take a value
+    "--bisect", "--add", "--close", "--minimize", "--gen-props",
+    "--mutate", "--snapshot",
+    # numeric value flags (also accept "--flaky" without a value → default runs)
+    "--flaky", "--flaky-dtw", "--weeks",
+}
+
+# Flags whose immediately-following arg must be a non-negative integer
+_NUMERIC_VALUE_FLAGS = {"--weeks", "--flaky", "--flaky-dtw"}
+
+
+def _validate_args(args):
+    """Reject unknown flags and obviously-wrong value types BEFORE the
+    if/elif dispatch in main(). This kills the silent typo bug (`forge
+    --frobulate` used to exit 0 with no output) and the silent type bug
+    (`forge --carmack --weeks abc` used to fall back to weeks=8 silently).
+
+    Returns None on success; on failure prints a clear error and exits 2.
+    """
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-") and a not in KNOWN_FLAGS:
+            # Try to be helpful: suggest the closest known flag if any.
+            import difflib
+            close = difflib.get_close_matches(a, sorted(KNOWN_FLAGS), n=1, cutoff=0.6)
+            hint = f"  Did you mean: {close[0]}" if close else ""
+            print(f"  ERROR: unrecognized flag: {a}")
+            if hint:
+                print(hint)
+            print(f"  Run `forge --help` for the full list.")
+            sys.exit(2)
+        if a in _NUMERIC_VALUE_FLAGS:
+            # The following arg, if present and not a flag itself, must be
+            # a non-negative integer. Missing/flag-next is allowed (caller
+            # falls back to default).
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            if nxt is not None and not nxt.startswith("-"):
+                if not nxt.lstrip("+").isdigit():
+                    print(f"  ERROR: {a} expects a non-negative integer, got {nxt!r}")
+                    sys.exit(2)
+                i += 1
+        i += 1
+
+
 def main():
     root = find_repo_root()
     args = sys.argv[1:]
@@ -3123,6 +3175,8 @@ def main():
     if "-h" in args or "--help" in args:
         print(HELP_TEXT)
         return
+
+    _validate_args(args)
 
     if "--full-cycle" in args:
         full_cycle(root)

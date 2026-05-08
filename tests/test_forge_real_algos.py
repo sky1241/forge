@@ -1964,3 +1964,59 @@ class TestCycle3ForgeConfig:
             f"only {len(forge.FORGE_CONFIG_DEFAULTS)} keys — should be >= 15. "
             f"Did a key get dropped?"
         )
+
+
+# ============================================================================
+# Cycle 3 — chunk 7 — CLI flag validation (whitelist + type checks)
+# ============================================================================
+
+
+class TestCycle3CliValidation:
+    """Before this chunk: `forge --frobulate` exited 0 silently. Now an
+    unknown flag is rejected with `did you mean?` hint. `--weeks abc`
+    used to fall back to default 8 silently — now it errors."""
+
+    def test_unknown_flag_rejected(self):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--frobulate"])
+        assert exc.value.code == 2
+
+    def test_unknown_flag_suggests_close_match(self, capsys):
+        with pytest.raises(SystemExit):
+            forge._validate_args(["--mutat"])
+        out = capsys.readouterr().out
+        assert "Did you mean" in out
+        assert "--mutate" in out
+
+    def test_known_flag_passes(self):
+        # No raise expected
+        forge._validate_args(["--baseline"])
+        forge._validate_args(["--carmack", "--weeks", "8"])
+        forge._validate_args(["--mutate", "src/x.py"])
+        forge._validate_args(["--gen-props", "src/x.py", "--include-destructive"])
+
+    def test_numeric_flag_with_non_int_rejected(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--weeks", "abc"])
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "non-negative integer" in out
+
+    def test_numeric_flag_without_value_ok(self):
+        # --flaky alone is valid (means "use default runs")
+        forge._validate_args(["--flaky"])
+        # --flaky followed by another flag is also valid — runs falls back
+        forge._validate_args(["--flaky", "--verbose"])
+
+    def test_short_flags_known(self):
+        forge._validate_args(["-v"])
+        forge._validate_args(["-h"])
+
+    def test_help_via_main_does_not_validate(self, monkeypatch, capsys):
+        """`forge --help` and `forge -h` print the help text and return
+        BEFORE _validate_args, so the user can always discover the flags."""
+        monkeypatch.setattr(sys, "argv", ["forge", "--help"])
+        forge.main()
+        out = capsys.readouterr().out
+        assert "USAGE" in out
+        assert "--carmack" in out
