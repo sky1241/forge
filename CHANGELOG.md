@@ -8,6 +8,59 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.0.4] - 2026-05-08
+
+Patch release that addresses 4 findings caught by the deep 4-agent
+audit (cousin pc1 + sky-master independent), plus a coverage gap
+on `fault_locate`'s display path. Cycle 5 Phase K closure.
+
+### Fixed
+- **Exit code consistency on `--paths-to-mutate` (B20)** — non-existent
+  path or path-outside-repo now exit `2` (CLI usage error convention),
+  not `1` (which is reserved for "command ran but failed", e.g.
+  mutation score below threshold). Same class as `forge --frobulate`
+  → exit 2. (cycle 5 K-2)
+
+### Added
+- **`--modularity` Q-thresholds are now cfg-tunable (B17)** — added
+  `modularity_q_good_threshold` (default 0.30, Newman 2006) and
+  `modularity_q_poor_threshold` (default 0.15) to
+  `FORGE_CONFIG_DEFAULTS`. Override in `.forge/config.json` for
+  stricter or looser team policies. Result dict surfaces the
+  thresholds so the print report formats from a single source of
+  truth. (cycle 5 K-4)
+- **README "All subcommands" table now lists cycle 5 features (B21)** —
+  `forge --modularity` and `forge --mutate --paths-to-mutate FILE`
+  added; the implicit "this is every public sub-command" claim is
+  honest again. (cycle 5 K-3)
+- **Symlink boundary regression test (B16)** — pins that
+  `forge --mutate --paths-to-mutate <symlink-pointing-outside-repo>`
+  rejects with exit 2 + "must point to a file inside the repo".
+  Path traversal protection was already there via
+  `Path.resolve().relative_to(root)`; this commit locks the contract.
+  (cycle 5 K-5)
+- **`fault_locate` end-to-end display test** — covers the SBFL
+  computation + suspect rendering + label band path that was
+  previously only exercised on the negative case. Coverage 74% → 77%.
+  (cycle 5 K-6)
+
+### Internal
+- **B-2 venv drift admitted and resolved locally** — `pip install -e .
+  --force-reinstall --no-deps` post-bump procedure documented in
+  cycle 6+ engagement (auto-audit cousin pc1 doc).
+- **Auto-audit + 4-agent deep audit conducted** — produced
+  `~/forge-auto-audit-cycle3-4-5.md` (1 agent, 527 lines, 7.5/10) and
+  `~/forge-deep-audit-cousin-2026-05-08.md` (4 agents, 8.4/10). The
+  multi-agent revealed 4 findings the solo audit missed (B19 main god
+  func, B20 exit code, B21 README, B22 G-1 optimism), validating the
+  multi-agent pattern for future releases.
+
+### Out of scope (cycle 6 candidates)
+- B19 `main()` god-function 242 LOC + 18 if/elif blocks → refactor
+  argparse / dict-handler. Tech debt, not a bug.
+- B22 G-1 "expected green" optimistic claim → retroactive lesson
+  learned, not fixable.
+
 ## [1.0.3] - 2026-05-08
 
 Patch release that brings the suite green on the full
@@ -275,7 +328,8 @@ mypy `--strict` passes the entire codebase.
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/sky1241/forge/releases/tag/v1.0.4
 [1.0.3]: https://github.com/sky1241/forge/releases/tag/v1.0.3
 [1.0.2]: https://github.com/sky1241/forge/releases/tag/v1.0.2
 [1.0.1]: https://github.com/sky1241/forge/releases/tag/v1.0.1
