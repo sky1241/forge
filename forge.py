@@ -3267,12 +3267,62 @@ KNOWN_FLAGS = {
 # Flags whose immediately-following arg must be a non-negative integer
 _NUMERIC_VALUE_FLAGS = {"--weeks", "--flaky", "--flaky-dtw"}
 
+# Flags that REQUIRE a non-flag value as the next arg. Pre-cycle4-P4
+# `forge --mutate` (no path) silently slipped through validation and
+# crashed downstream with IndexError, or worse, no-op'd. Cousin pc1
+# audit listed this as "validator incomplete: 80% coverage". P4 closes
+# the gap. `--minimize` requires TWO values (test + file) — we enforce
+# the first here; the second is checked at dispatch (the function call
+# already prints a usage hint when the second is absent).
+#
+# Note: `--flaky` and `--flaky-dtw` are NOT in this set — they accept
+# a default when no value is given (test_numeric_flag_without_value_ok
+# covers that). Only flags whose semantic genuinely requires a value
+# every time are listed here.
+_REQUIRES_VALUE = {
+    "--mutate", "--bisect", "--close", "--minimize", "--gen-props",
+    "--snapshot", "--add", "--weeks",
+}
+
+# What kind of value each flag expects, for clearer error messages.
+_VALUE_DESCRIPTION = {
+    "--mutate": "a path to the file to mutate",
+    "--bisect": "a test name (or pytest -k expression)",
+    "--close": "a bug id (BUG-001 or 1)",
+    "--minimize": "a test name (followed by an input file)",
+    "--gen-props": "a path to the module to generate properties for",
+    "--snapshot": "a command string to capture",
+    "--add": "a bug description (multi-word ok)",
+    "--weeks": "a non-negative integer (history horizon)",
+}
+
+
+def _expand_equals_args(args):
+    """Split `--key=value` into `--key`, `value` so the rest of the
+    validator + dispatch can treat both `--weeks 8` and `--weeks=8`
+    identically. Standard argparse convention. Args without `=` or
+    that don't start with `--` pass through unchanged.
+
+    Returns a NEW list — the caller should rebind sys.argv-derived args.
+    """
+    out = []
+    for a in args:
+        if a.startswith("--") and "=" in a:
+            key, _, value = a.partition("=")
+            out.append(key)
+            out.append(value)
+        else:
+            out.append(a)
+    return out
+
 
 def _validate_args(args):
     """Reject unknown flags and obviously-wrong value types BEFORE the
     if/elif dispatch in main(). This kills the silent typo bug (`forge
-    --frobulate` used to exit 0 with no output) and the silent type bug
-    (`forge --carmack --weeks abc` used to fall back to weeks=8 silently).
+    --frobulate` used to exit 0 with no output), the silent type bug
+    (`forge --carmack --weeks abc` used to fall back to weeks=8 silently),
+    and the silent missing-value bug (`forge --mutate` with no path
+    used to slip through and IndexError later).
 
     Returns None on success; on failure prints a clear error and exits 2.
     """
@@ -3289,16 +3339,31 @@ def _validate_args(args):
                 print(hint)
             print(f"  Run `forge --help` for the full list.")
             sys.exit(2)
-        if a in _NUMERIC_VALUE_FLAGS:
-            # The following arg, if present and not a flag itself, must be
-            # a non-negative integer. Missing/flag-next is allowed (caller
-            # falls back to default).
+        if a in _REQUIRES_VALUE:
+            # The next arg must be present AND must not be another flag.
+            # Both pre-P4 silent bugs (forge --mutate, forge --weeks)
+            # come from this case being unchecked.
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            if nxt is None or nxt.startswith("-"):
+                desc = _VALUE_DESCRIPTION.get(a, "a value")
+                print(f"  ERROR: {a} requires {desc}.")
+                if nxt is not None:
+                    print(f"  Got next arg: {nxt!r}")
+                sys.exit(2)
+            if a in _NUMERIC_VALUE_FLAGS:
+                if not nxt.lstrip("+").isdigit():
+                    print(f"  ERROR: {a} expects a non-negative integer, got {nxt!r}")
+                    sys.exit(2)
+            i += 1  # consumed the value
+        elif a in _NUMERIC_VALUE_FLAGS:
+            # Value optional (e.g. --flaky alone uses default runs) but
+            # if present must parse as a non-negative integer.
             nxt = args[i + 1] if i + 1 < len(args) else None
             if nxt is not None and not nxt.startswith("-"):
                 if not nxt.lstrip("+").isdigit():
                     print(f"  ERROR: {a} expects a non-negative integer, got {nxt!r}")
                     sys.exit(2)
-                i += 1
+                i += 1  # consumed the value
         i += 1
 
 
@@ -3310,6 +3375,10 @@ def main():
         print(HELP_TEXT)
         return
 
+    # Expand --key=value → --key, value so the dispatch below + the
+    # validator both work with the same canonical form. argparse-style
+    # convention; pre-P4 `forge --weeks=2` was rejected as "unknown flag".
+    args = _expand_equals_args(args)
     _validate_args(args)
 
     if "--full-cycle" in args:

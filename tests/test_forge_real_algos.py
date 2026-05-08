@@ -2290,3 +2290,125 @@ class TestCycle3CliValidation:
         out = capsys.readouterr().out
         assert "USAGE" in out
         assert "--carmack" in out
+
+
+class TestCycle4P4ValidatorCompletes:
+    """Cycle 4 P4: cousin pc1 audit caught two leftovers from chunk 7's
+    'reject unknown, type-check' claim:
+
+      1. value-required flags (--mutate, --bisect, --close, --minimize,
+         --gen-props, --snapshot, --add, --weeks) without a value
+         silently slipped through and crashed downstream with IndexError.
+
+      2. argparse-style `--key=value` parsing was rejected as 'unknown
+         flag --key=value' instead of being split.
+
+    P4 closes both: _REQUIRES_VALUE check + _expand_equals_args.
+    """
+
+    def test_mutate_without_path_rejected(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--mutate"])
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "--mutate requires" in out
+        assert "path" in out  # the description mentions "path"
+
+    def test_bisect_without_test_name_rejected(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--bisect"])
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "--bisect requires" in out
+
+    def test_close_without_id_rejected(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--close"])
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "--close requires" in out
+
+    def test_minimize_without_test_name_rejected(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--minimize"])
+        assert exc.value.code == 2
+
+    def test_gen_props_without_module_rejected(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--gen-props"])
+        assert exc.value.code == 2
+
+    def test_snapshot_without_command_rejected(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--snapshot"])
+        assert exc.value.code == 2
+
+    def test_add_without_description_rejected(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--add"])
+        assert exc.value.code == 2
+
+    def test_weeks_without_value_rejected(self, capsys):
+        """--weeks alone now errors (was: silently fell back to default
+        weeks=8). Numeric flags --flaky and --flaky-dtw remain optional."""
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--weeks"])
+        assert exc.value.code == 2
+
+    def test_value_flag_followed_by_another_flag_rejected(self, capsys):
+        """--mutate --include-destructive (no path between) must error.
+        Pre-P4: '--include-destructive' was silently consumed as the
+        path arg, leading to a misleading 'file not found'."""
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(["--mutate", "--include-destructive"])
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "--mutate requires" in out
+
+    def test_equals_form_accepted(self):
+        """--weeks=8 must parse as --weeks 8. argparse-style convention."""
+        expanded = forge._expand_equals_args(["--carmack", "--weeks=8"])
+        assert expanded == ["--carmack", "--weeks", "8"]
+        # And the result validates as a known invocation
+        forge._validate_args(expanded)
+
+    def test_equals_form_invalid_int_rejected(self, capsys):
+        """--weeks=abc must be rejected by the same int check."""
+        expanded = forge._expand_equals_args(["--weeks=abc"])
+        assert expanded == ["--weeks", "abc"]
+        with pytest.raises(SystemExit) as exc:
+            forge._validate_args(expanded)
+        assert exc.value.code == 2
+
+    def test_equals_form_with_path_value(self):
+        """--mutate=src/x.py expanded to --mutate src/x.py."""
+        expanded = forge._expand_equals_args(["--mutate=src/x.py"])
+        assert expanded == ["--mutate", "src/x.py"]
+        forge._validate_args(expanded)
+
+    def test_equals_form_only_first_equals_splits(self):
+        """A value containing `=` (e.g. --snapshot=K=V) must split only
+        on the FIRST `=`, preserving the rest of the value."""
+        expanded = forge._expand_equals_args(["--snapshot=echo K=V"])
+        assert expanded == ["--snapshot", "echo K=V"]
+
+    def test_non_equals_args_passthrough(self):
+        """Args without `=` or that don't start with `--` pass unchanged."""
+        expanded = forge._expand_equals_args(["--baseline", "tests/x.py", "-v"])
+        assert expanded == ["--baseline", "tests/x.py", "-v"]
+
+    def test_main_accepts_equals_form_end_to_end(self, monkeypatch, tmp_path, capsys):
+        """End-to-end: `forge --weeks=8 --baseline` must reach dispatch
+        without the 'unknown flag --weeks=8' error that pre-P4 produced."""
+        # Stub run_tests so main returns quickly without invoking pytest
+        monkeypatch.setattr(forge, "run_tests", lambda *a, **kw:
+                            {"total": 1, "passed": 1, "failed": 0, "errors": 0,
+                             "skipped": 0, "details": [], "duration": 0.1,
+                             "passed_tests": ["t::a"], "failed_tests": [],
+                             "xfailed_tests": [], "xpassed_tests": []})
+        monkeypatch.setattr(forge, "find_repo_root", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", ["forge", "--baseline"])
+        forge.main()
+        out = capsys.readouterr().out
+        # Must have reached the baseline dispatch and saved something
+        assert "Baseline saved" in out or "FORGE REPORT" in out
