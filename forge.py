@@ -1413,7 +1413,14 @@ def log_run(root: Path, results: dict[str, Any]) -> None:
         "duration": results["duration"]
     }
     line = json.dumps(entry) + "\n"
-    try:
+    # `sys.platform != "win32"` narrowing rather than `try: import fcntl
+    # except ImportError`: mypy --strict on Windows resolves the fcntl stub
+    # but stubs don't expose POSIX-only `flock`/`LOCK_EX`/`LOCK_UN`, so the
+    # try/except form raised 4 attr-defined errors on the win32 strict run
+    # (cycle 4 J-3, B15). The platform check is a recognized mypy narrowing
+    # pattern: on Windows the entire branch is dead code, on POSIX it's the
+    # only branch evaluated. Same runtime behavior, cleaner type story.
+    if sys.platform != "win32":
         import fcntl
         with open(log_path, "a", encoding="utf-8") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -1422,8 +1429,8 @@ def log_run(root: Path, results: dict[str, Any]) -> None:
                 f.flush()
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except ImportError:
-        # Windows: no fcntl. Best-effort append, document as known race.
+    else:
+        # Windows: no fcntl. Best-effort append, documented race condition.
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(line)
 
