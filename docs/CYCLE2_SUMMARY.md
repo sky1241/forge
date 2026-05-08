@@ -55,33 +55,29 @@ accepts both prefix and suffix conventions, forge only matched
 generated `from mkdocs.utils.__init__ import *` instead of clean
 `from mkdocs.utils import *`. Redundant + DeprecationWarning in 3.13+.
 
-### ❌ NOT FIXED YET — `find_tests()` doesn't honor `norecursedirs`
-**Found by cousin pc1 on pytest.** `pyproject.toml` had `norecursedirs =
-["testing/example_scripts", ...]` but forge globbed all `**/test_*.py` and
-hit those directories. Pytest then errored "ManifestDirectory not match".
-Workaround: rm those dirs. **Future fix**: parse pyproject.toml's
-`tool.pytest.ini_options.norecursedirs` and exclude.
+### ✅ FIXED — `find_tests()` honors `[tool.pytest.ini_options] norecursedirs`
+**Found by cousin pc1 on pytest.** Now reads `pyproject.toml` via stdlib
+`tomllib` (Python 3.11+) and excludes any dir listed in
+`norecursedirs`. Test: `TestFindTestsHonorsNoRecursedirs`.
 
-### ❌ NOT FIXED YET — `--gen-props` sys.path pollution
-**Found by cousin pc1 on mkdocs.** Generated test inserts the module's
-parent dir into sys.path, which can shadow installed packages
-(e.g. `<repo>/mkdocs/utils/yaml.py` shadowed PyPI `yaml` package). Should
-NOT insert the inner module dir, just the repo root.
+### ✅ FIXED — `--gen-props` sys.path no longer pollutes external imports
+**Found by cousin pc1 on mkdocs.** Removed the inner-module-dir insertion
+that shadowed PyPI packages (e.g. `<repo>/mkdocs/utils/yaml.py` vs
+`yaml` package). Only the repo root is now inserted. Test:
+`TestGenPropsNoSysPathPollution`.
 
-### ❌ NOT FIXED YET — `--gen-props` exception whitelist too narrow
-**Found by cousin pc1.** Generated tests fail on legitimate exceptions
-not in the default catch list:
-- `SyntaxError` for parser functions (black on `parse_ast`)
-- `pytest.UsageError` for CLI helpers
-- `len(None)` in subset tests when function returns `None`
+### ✅ FIXED — `--gen-props` exception whitelist broadened + None-safety
+**Found by cousin pc1.** The smoke-test except clause now catches
+`SyntaxError`, `LookupError`, `ArithmeticError`, `AssertionError` and
+`Exception` (catch-all for custom package exceptions like
+`pytest.UsageError`). The "subset" test now guards `if result is not
+None:` before `len(result)`. Tests:
+`TestGenPropsExceptionWhitelistBroader`, `TestGenPropsSubsetTestNoneSafe`.
 
-Auto-detection of package's custom exceptions or wider default catch needed.
-
-### ❌ NOT FIXED YET — `--predict` artifact `loc=1` fallback
+### ✅ FIXED — `--predict` clamps `loc` to `MIN_PREDICT_LOC` for churn ratio
 **First reported on scrapy** (earlier session), **confirmed on pytest**
-this cycle. Files with `loc=1` (typically empty `__init__.py` or stubs)
-get artificially inflated churn ratio. Need a minimum-loc threshold
-before computing churn.
+this cycle. `churn_rel = (added+deleted) / max(loc, 10)` so trivial
+1-line stubs can't dominate ranking. Test: `TestPredictMinLocClamp`.
 
 ## Limitations documented (not bugs)
 
@@ -117,6 +113,7 @@ exist.
 - `TestGenPropsImportPathStripsInit` — `__init__.py` modules use clean
   import path
 
-## Total: 4 forge fixes + 4 new regression tests + 4 bugs documented for future
+## Total: 8 forge fixes + 10 new regression tests + 0 bugs left from cycle 2
 
-85 tests pass on sky-master. Forge ↗.
+91 tests pass on sky-master. Cycle 2 closed all open findings — no
+"NOT FIXED YET" remaining.

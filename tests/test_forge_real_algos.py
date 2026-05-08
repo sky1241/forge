@@ -541,6 +541,152 @@ class TestPytestParserRegression:
         assert forge._parse_pytest_failures(out) == []
 
 
+class TestFindTestsHonorsNoRecursedirs:
+    """Cousin pc1 cycle 2 finding on pytest repo: pyproject.toml had
+    [tool.pytest.ini_options] norecursedirs but forge globbed every
+    **/test_*.py and hit those dirs anyway, then pytest errored
+    'ManifestDirectory not match'. Now we honor pytest's exclusion."""
+
+    def test_norecursedirs_from_pyproject_excluded(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FORGE_INCLUDE_BENCHMARKS", raising=False)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_real.py").write_text("def test_a(): pass\n")
+        (tmp_path / "testing").mkdir()
+        (tmp_path / "testing" / "example_scripts").mkdir()
+        (tmp_path / "testing" / "example_scripts" / "test_skip_me.py").write_text(
+            "def test_b(): pass\n"
+        )
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.pytest.ini_options]\n'
+            'norecursedirs = ["testing/example_scripts"]\n',
+            encoding="utf-8",
+        )
+        files = forge.find_tests(tmp_path)
+        names = [str(f) for f in files]
+        assert any("tests/test_real.py" in n for n in names), \
+            f"real test must be picked: {names}"
+        assert not any("example_scripts/test_skip_me.py" in n for n in names), \
+            f"norecursedirs excluded path must not appear: {names}"
+
+    def test_no_pyproject_works_silently(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FORGE_INCLUDE_BENCHMARKS", raising=False)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text("def test_a(): pass\n")
+        # No pyproject.toml at all — must not crash, must return tests
+        files = forge.find_tests(tmp_path)
+        assert any("test_a.py" in str(f) for f in files)
+
+
+class TestGenPropsNoSysPathPollution:
+    """Cousin pc1 cycle 2 finding on mkdocs: gen-props inserted the inner
+    module dir (e.g. <repo>/mkdocs/utils/) into sys.path[0], shadowing
+    PyPI 'yaml' with an internal mkdocs/utils/yaml.py file. The inner
+    insertion is now removed; only repo root is added."""
+
+    def test_only_one_syspath_insert(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "module.py").write_text(
+            "def hello(s):\n    return s.upper()\n", encoding="utf-8"
+        )
+        (tmp_path / "tests").mkdir()
+        _git_commit(tmp_path)
+        forge.gen_props(tmp_path, str(tmp_path / "pkg" / "module.py"))
+        out = (tmp_path / "tests" / "test_props_module.py").read_text()
+        sys_path_inserts = out.count("sys.path.insert(0,")
+        assert sys_path_inserts == 1, (
+            f"only the repo-root sys.path.insert is allowed; got {sys_path_inserts}\n"
+            f"file content:\n{out[:500]}"
+        )
+        # And the inner module dir must NOT be in any insert
+        assert "'pkg'" not in out and '"pkg"' not in out, (
+            f"inner pkg dir must not be added to sys.path:\n{out[:500]}"
+        )
+
+
+class TestGenPropsExceptionWhitelistBroader:
+    """Cousin pc1 cycle 2 finding: SyntaxError (parser fns), pytest.UsageError
+    (CLI), and Exception fallback all needed in the smoke-test except clause.
+    Now SyntaxError, LookupError, ArithmeticError, AssertionError + Exception
+    catch-all are present."""
+
+    def test_smoke_test_catches_syntaxerror_and_friends(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "module.py").write_text(
+            "def parse_thing(s):\n    return s.split('::')\n", encoding="utf-8"
+        )
+        (tmp_path / "tests").mkdir()
+        _git_commit(tmp_path)
+        forge.gen_props(tmp_path, str(tmp_path / "pkg" / "module.py"))
+        out = (tmp_path / "tests" / "test_props_module.py").read_text()
+        # SyntaxError must be in the except clause for parser-shaped functions
+        assert "SyntaxError" in out, f"SyntaxError must be in whitelist:\n{out[:600]}"
+        # Catch-all Exception is required for unknown custom exceptions
+        assert "Exception" in out
+
+
+class TestGenPropsSubsetTestNoneSafe:
+    """Cousin pc1 cycle 2 finding on pytest's apply_warning_filters: returns
+    None when no filters are present, and the generated subset test then did
+    `len(None)` → TypeError. Generated test must check for None first."""
+
+    def test_subset_test_handles_none_return(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "module.py").write_text(
+            "def filter_things(items):\n    return [x for x in items if x]\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "tests").mkdir()
+        _git_commit(tmp_path)
+        forge.gen_props(tmp_path, str(tmp_path / "pkg" / "module.py"))
+        out = (tmp_path / "tests" / "test_props_module.py").read_text()
+        # The 'filter' name should trigger the subset test, AND it must be
+        # None-tolerant.
+        assert "test_filter_things_subset" in out
+        assert "if result is not None:" in out, (
+            f"subset test must guard against None return:\n{out[:600]}"
+        )
+
+
+class TestPredictMinLocClamp:
+    """Cousin pc1 cycle 2 finding (also seen on scrapy): files with loc=1 (empty
+    __init__.py / stubs) inflate churn_rel to absurd values when even 1 line
+    is touched, dominating --predict ranking. Now clamped to MIN_PREDICT_LOC."""
+
+    def test_loc_1_does_not_dominate_predict(self, tmp_path, monkeypatch):
+        _git_init(tmp_path)
+        # Tiny stub file: 1 line, then 1 line touched
+        (tmp_path / "stub.py").write_text("x = 1\n", encoding="utf-8")
+        # Real file: many lines, 1 line touched
+        big = "\n".join(f"def f{i}(): return {i}" for i in range(100))
+        (tmp_path / "big.py").write_text(big + "\n", encoding="utf-8")
+        _git_commit(tmp_path, "init")
+        # Touch both files
+        (tmp_path / "stub.py").write_text("x = 2\n", encoding="utf-8")
+        (tmp_path / "big.py").write_text(big.replace("def f0(): return 0", "def f0(): return 99") + "\n", encoding="utf-8")
+        _git_commit(tmp_path, "edit both")
+        # Capture predict output
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            forge.predict_defects(tmp_path, weeks=1)
+        out = buf.getvalue()
+        # Find churn for each file in output (format: "churn=X.X")
+        import re
+        stub_churn = float(re.search(r'stub\.py.*?churn=(\S+)', out, re.S).group(1))
+        big_churn = float(re.search(r'big\.py.*?churn=(\S+)', out, re.S).group(1))
+        # Both got 1 line edited, but stub has loc=1 vs big has loc=100.
+        # Before fix: stub_churn = 2.0, big_churn ≈ 0.02 (100x ratio difference).
+        # After fix: stub_churn capped (loc treated as max(1, 10) = 10),
+        # so stub_churn = 0.2, much closer to big_churn.
+        assert stub_churn <= 0.5, (
+            f"stub.py churn must be clamped (<=0.5), got {stub_churn} "
+            f"— loc=1 fallback artefact still present"
+        )
+
+
 class TestFindTestsAlsoMatchesUnderscoreTests:
     """Cousin pc1 cycle 2 finding on mkdocs: 19 test files invisible to forge
     because they use the *_tests.py suffix (e.g. build_tests.py) instead of
