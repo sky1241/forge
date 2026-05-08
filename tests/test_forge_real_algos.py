@@ -3210,3 +3210,66 @@ class TestCycle4P4ValidatorCompletes:
         out = capsys.readouterr().out
         # Must have reached the baseline dispatch and saved something
         assert "Baseline saved" in out or "FORGE REPORT" in out
+
+
+class TestCycle5P1PathsToMutate:
+    """Cycle 5 P1: `forge --mutate --paths-to-mutate FILE` is the
+    explicit-validated form of the legacy positional `forge --mutate FILE`.
+    File must exist and live inside the repo; rejection is fail-fast
+    (exit non-zero with a clear message) instead of "No Python files
+    to mutate" downstream after the user mistypes."""
+
+    def test_paths_to_mutate_isolates_target(self, monkeypatch, tmp_path):
+        """`--paths-to-mutate file_a.py` must call run_mutation with
+        file_a.py as the target — file_b.py must never reach the
+        mutator. Without this, a typo'd flag would silently mutate
+        the whole repo."""
+        (tmp_path / "file_a.py").write_text("def add(a, b): return a + b\n")
+        (tmp_path / "file_b.py").write_text("def mul(a, b): return a * b\n")
+        captured: dict[str, Any] = {"target": "<unset>"}
+
+        def fake_run_mutation(root, target, cfg=None):
+            captured["target"] = target
+            return 100.0  # 100% kill rate (pct, not ratio); won't trip sys.exit
+
+        monkeypatch.setattr(forge, "run_mutation", fake_run_mutation)
+        monkeypatch.setattr(forge, "find_repo_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["forge", "--mutate", "--paths-to-mutate", "file_a.py"],
+        )
+        forge.main()
+        assert captured["target"] is not None, "run_mutation should have been called"
+        target_str = str(captured["target"])
+        assert "file_a.py" in target_str, f"target should be file_a.py: {target_str}"
+        assert "file_b.py" not in target_str, (
+            f"file_b.py must not have leaked into target: {target_str}"
+        )
+
+    def test_paths_to_mutate_without_mutate_rejected(self, monkeypatch, capsys):
+        """`forge --paths-to-mutate FILE` without `--mutate` is meaningless;
+        reject with exit 2 + clear error rather than silently ignoring."""
+        monkeypatch.setattr(sys, "argv", ["forge", "--paths-to-mutate", "x.py"])
+        with pytest.raises(SystemExit) as exc:
+            forge.main()
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "must be combined with --mutate" in out
+
+    def test_paths_to_mutate_nonexistent_file_rejected(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """`--paths-to-mutate <missing>` exits non-zero with a clear
+        "file not found" error — fail-fast at the boundary instead of
+        running run_mutation and getting "No Python files to mutate"."""
+        monkeypatch.setattr(forge, "find_repo_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["forge", "--mutate", "--paths-to-mutate", "does_not_exist.py"],
+        )
+        with pytest.raises(SystemExit) as exc:
+            forge.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "file not found" in out
+        assert "does_not_exist.py" in out

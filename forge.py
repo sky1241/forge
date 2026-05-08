@@ -3747,7 +3747,8 @@ FLAKY / BISECT
 TEST GENERATION / MUTATION
   forge --gen-props PATH           Hypothesis property tests (skips destructive funcs by default)
   forge --gen-props PATH --include-destructive    DANGEROUS: fuzz destructive funcs
-  forge --mutate [TARGET]          pure-Python mutation testing
+  forge --mutate [TARGET]          libcst (AST-aware) mutation testing
+  forge --mutate --paths-to-mutate PATH    same, but with explicit-validated single-file targeting
   forge --minimize TEST INPUT      ddmin (Zeller 2002) on a failing input
 
 SNAPSHOT
@@ -3779,7 +3780,7 @@ KNOWN_FLAGS = {
     "--snapshot-check", "--diff", "--verbose", "--include-destructive",
     # flags that take a value
     "--bisect", "--add", "--close", "--minimize", "--gen-props",
-    "--mutate", "--snapshot",
+    "--mutate", "--snapshot", "--paths-to-mutate",
     # numeric value flags (also accept "--flaky" without a value → default runs)
     "--flaky", "--flaky-dtw", "--weeks",
 }
@@ -3801,7 +3802,7 @@ _NUMERIC_VALUE_FLAGS = {"--weeks", "--flaky", "--flaky-dtw"}
 # every time are listed here.
 _REQUIRES_VALUE = {
     "--mutate", "--bisect", "--close", "--minimize", "--gen-props",
-    "--snapshot", "--add", "--weeks",
+    "--snapshot", "--add", "--weeks", "--paths-to-mutate",
 }
 
 # What kind of value each flag expects, for clearer error messages.
@@ -3814,6 +3815,7 @@ _VALUE_DESCRIPTION = {
     "--snapshot": "a command string to capture",
     "--add": "a bug description (multi-word ok)",
     "--weeks": "a non-negative integer (history horizon)",
+    "--paths-to-mutate": "a path to the single file to mutate (validated)",
 }
 
 
@@ -3867,6 +3869,13 @@ def _validate_args(args: list[str]) -> None:
             # itself (1448 mutants ≈ 24h). P11 catches the empty string
             # explicitly with a clear error message.
             nxt = args[i + 1] if i + 1 < len(args) else None
+            # Cycle 5 P1: `forge --mutate --paths-to-mutate FILE` is valid;
+            # --paths-to-mutate carries the target, not the next positional.
+            # Skip the value-required check for --mutate when the next arg
+            # is the explicit --paths-to-mutate flag.
+            if a == "--mutate" and nxt == "--paths-to-mutate":
+                i += 1
+                continue
             if nxt is None or nxt == "" or nxt.startswith("-"):
                 desc = _VALUE_DESCRIPTION.get(a, "a value")
                 print(f"  ERROR: {a} requires {desc}.")
@@ -4031,9 +4040,41 @@ def main() -> None:
         gen_props(root, module_path, include_destructive=include_destructive)
         return
 
+    # Cycle 5 P1: --paths-to-mutate without --mutate is meaningless. Reject
+    # before the --mutate dispatch to give a clear error rather than silently
+    # ignoring the flag.
+    if "--paths-to-mutate" in args and "--mutate" not in args:
+        print("  ERROR: --paths-to-mutate must be combined with --mutate")
+        print("  Usage: forge --mutate --paths-to-mutate path/to/file.py")
+        sys.exit(2)
+
     if "--mutate" in args:
         idx = args.index("--mutate")
-        target = args[idx + 1] if idx + 1 < len(args) and not args[idx + 1].startswith("-") else None
+        target: str | None = (
+            args[idx + 1] if idx + 1 < len(args) and not args[idx + 1].startswith("-") else None
+        )
+        # Cycle 5 P1: --paths-to-mutate is the explicit-and-validated form of
+        # the legacy positional `--mutate FILE`. It overrides target if both
+        # are present (and validates harder: file must exist + live inside the
+        # repo root). Run --mutate alone or with the positional for the legacy
+        # un-validated path; use --paths-to-mutate when you want fail-fast on
+        # typos instead of "No Python files to mutate" downstream.
+        if "--paths-to-mutate" in args:
+            ptm_idx = args.index("--paths-to-mutate")
+            ptm = args[ptm_idx + 1]  # _validate_args has already enforced this
+            ptm_path = Path(ptm)
+            if not ptm_path.is_absolute():
+                ptm_path = root / ptm_path
+            if not ptm_path.exists():
+                print(f"  ERROR: --paths-to-mutate file not found: {_safe_path(ptm_path)}")
+                sys.exit(1)
+            try:
+                ptm_path.resolve().relative_to(root.resolve())
+            except ValueError:
+                print(f"  ERROR: --paths-to-mutate must point to a file inside the repo: "
+                      f"{_safe_path(ptm_path)}")
+                sys.exit(1)
+            target = str(ptm_path)
         cfg = _load_forge_config(root)
         score = run_mutation(root, target, cfg=cfg)
         if score is None:
