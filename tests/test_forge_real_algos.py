@@ -892,12 +892,25 @@ class TestFaultLocateTimeoutGraceful:
     with actionable hints (FORGE_TEST_FILTER, etc.)."""
 
     def test_locate_handles_timeout_gracefully(self, tmp_path, monkeypatch, capsys):
+        """Cycle 4 Phase B (trou A): hermicity fix. Pre-Phase-B this
+        test failed when `coverage` or `pytest_cov` were absent from the
+        venv because fault_locate's two early-returns short-circuited
+        before the subprocess.run mock could fire. Now we monkeypatch
+        BOTH gates so the test is hermetic — the subprocess timeout
+        path is exercised regardless of optional deps."""
         import subprocess as _sp
-        # Minimal valid layout
+        import types as _types
         _git_init(tmp_path)
         (tmp_path / "tests").mkdir()
         (tmp_path / "tests" / "test_x.py").write_text("def test_x(): pass\n", encoding="utf-8")
         _git_commit(tmp_path)
+
+        # Gate 1: forge._check_dep("coverage") — return a truthy fake module
+        monkeypatch.setattr(forge, "_check_dep",
+                            lambda name, pip_name=None: _types.SimpleNamespace())
+        # Gate 2: __import__("pytest_cov") — inject a fake into sys.modules
+        # so the bare __import__ call resolves without ImportError.
+        monkeypatch.setitem(sys.modules, "pytest_cov", _types.ModuleType("pytest_cov"))
 
         # Force the pytest --cov run to TimeoutExpired
         real_run = _sp.run
@@ -908,12 +921,10 @@ class TestFaultLocateTimeoutGraceful:
             return real_run(cmd, *args, **kwargs)
 
         monkeypatch.setattr(forge.subprocess, "run", fake_run)
-        # Should NOT raise
         forge.fault_locate(tmp_path)
         out = capsys.readouterr().out
         assert "TIMEOUT" in out, f"timeout must be surfaced cleanly: {out!r}"
         assert "FORGE_TEST_FILTER" in out, f"actionable hint missing: {out!r}"
-        # No Python traceback should leak to the user
         assert "Traceback" not in out
 
 
@@ -957,9 +968,16 @@ class TestFaultLocateSurfacesCollectionErrors:
 
     def test_locate_surfaces_collection_error(self, tmp_path, monkeypatch, capsys):
         """When pytest exits non-zero with no PASSED/FAILED entries, --locate
-        prints PYTEST RUNNER ERROR + the tail, instead of 'no failing tests'."""
-        # Need real layout: tests/ + a "broken" test file that pytest can find
-        # but that causes collection error.
+        prints PYTEST RUNNER ERROR + the tail, instead of 'no failing tests'.
+
+        Cycle 4 Phase B (trou A): this test invokes a real pytest --cov
+        subprocess to reproduce the collection-error shape. That requires
+        BOTH `coverage` and `pytest-cov` to be importable. If absent, skip
+        cleanly instead of failing with the misleading "coverage not
+        installed" message that the cycle-3 version produced."""
+        pytest.importorskip("coverage")
+        pytest.importorskip("pytest_cov")
+
         _git_init(tmp_path)
         (tmp_path / "tests").mkdir()
         # Valid test (would pass normally)
@@ -1810,6 +1828,27 @@ class TestCycle3IterNumstatCommits:
         assert len(commits) == 1
         assert commits[0]["hash"] == "abc"
         assert commits[0]["files"] == [(5, 1, "y.py")]
+
+    def test_numstat_empty_string_count_coerces_to_zero(self):
+        """Cycle 4 Phase B edge case: a numstat field that arrives as
+        empty string (corrupted git output, partial-clone artifact) must
+        coerce to 0 silently rather than crash with ValueError. The
+        existing `added.isdigit()` check covers `"-"` (binary file marker)
+        AND the empty-string case — pinning here so a future refactor
+        can't drop the guard and start raising on legit git output."""
+        raw = (
+            "COMMIT abc author@x.com 2026-01-01T00:00:00+00:00 fix bug\n"
+            "\t\tlost.py\n"  # both fields empty (not legal git output, but defensive)
+            "10\t-\tbinary.bin\n"  # added=10, deleted="-" (binary)
+            "-\t-\tboth_binary.bin\n"  # both "-"
+        )
+        commits = list(forge._iter_numstat_commits(raw))
+        assert len(commits) == 1
+        files = commits[0]["files"]
+        # Each tuple must coerce malformed to 0; no exception escapes.
+        assert (0, 0, "lost.py") in files
+        assert (10, 0, "binary.bin") in files
+        assert (0, 0, "both_binary.bin") in files
 
     def test_bugfix_keywords_are_constant(self):
         """All sites must reference the same BUGFIX_KEYWORDS tuple. Was

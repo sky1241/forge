@@ -39,6 +39,9 @@ import json
 import time
 import subprocess
 import hashlib
+import difflib
+import shlex
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
@@ -68,8 +71,11 @@ FLAKY_FILE = f"{FORGE_DIR}/flaky.json"
 # to persist heatmap output, add the constant back at that point.
 SNAPSHOT_DIR = f"{FORGE_DIR}/snapshots"
 MUTATION_THRESHOLD = 80
-PREDICT_WEIGHTS = {"churn": 0.20, "freq": 0.20, "burst": 0.15,
-                   "authors": 0.10, "bugfix": 0.15, "loc": 0.05, "recency": 0.15}
+# PREDICT_WEIGHTS module-level constant removed in cycle 4 Phase B —
+# duplicated cfg["predict_weights"] (FORGE_CONFIG_DEFAULTS literal below)
+# and was never referenced from forge.py code. The dict is now defined
+# inline in FORGE_CONFIG_DEFAULTS as the single source of truth, read
+# via cfg lookup like every other knob.
 OCHIAI_TOP_N = 10
 MINIMIZE_MAX_ITER = 100
 CARMACK_KALMAN_Q = 0.05   # Kalman process noise (how fast risk changes)
@@ -197,7 +203,6 @@ def _load_forge_config_with_sources(root):
         # The warning preserves cycle 3 chunk 6 behavior — typos in
         # config.json no longer silently change nothing. P10 adds the
         # `did you mean` hint via difflib for typos close to a real key.
-        import difflib
         msg_parts = []
         for key in sorted(unknown):
             close = difflib.get_close_matches(key, list(cfg), n=1, cutoff=0.6)
@@ -1035,7 +1040,6 @@ def save_json(path, data):
     atomically rename to `path`. If anything raises during write, the
     temp file is removed and `path` is unchanged.
     """
-    import tempfile
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     # delete=False so we can manage rename ourselves; suffix .tmp so a
@@ -1285,8 +1289,8 @@ def log_run(root, results):
     in the docstring rather than papered over with msvcrt.locking, which
     has different semantics (byte-range, not whole-file).
     """
-    log_path = root / FORGE_LOG
-    os.makedirs(os.path.dirname(str(log_path)) or ".", exist_ok=True)
+    log_path = Path(root) / FORGE_LOG
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "date": datetime.now().isoformat(),
         "passed": results["passed"],
@@ -1695,7 +1699,6 @@ def snapshot_capture(root, cmd_str):
 
     print(f"  Capturing: {cmd_str}")
     try:
-        import shlex
         result = subprocess.run(shlex.split(cmd_str), shell=False, capture_output=True,
                                text=True, cwd=str(root), timeout=cmd_timeout,
                                encoding="utf-8", errors="replace")
@@ -1749,7 +1752,6 @@ def snapshot_check(root):
 
         # Re-run command
         try:
-            import shlex
             result = subprocess.run(shlex.split(meta["command"]), shell=False,
                                    capture_output=True, text=True,
                                    cwd=str(root), timeout=cmd_timeout,
@@ -1988,7 +1990,6 @@ def _rebuild_input(chunks, fmt, original_content=""):
 
 def _test_with_input(root, test_name, input_content, input_ext, timeout=None):
     """Write input to temp file and run test. Returns True if test FAILS."""
-    import tempfile
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=input_ext, delete=False,
                                       encoding="utf-8", dir=str(root / FORGE_DIR))
     try:
@@ -2843,7 +2844,7 @@ def fault_locate(root):
     suspects = []
     for src_file in cd.measured_files():
         # Skip test files
-        basename = os.path.basename(src_file)
+        basename = Path(src_file).name
         if basename.startswith("test_") or basename == "__init__.py":
             continue
 
@@ -3557,7 +3558,6 @@ def _validate_args(args):
         a = args[i]
         if a.startswith("-") and a not in KNOWN_FLAGS:
             # Try to be helpful: suggest the closest known flag if any.
-            import difflib
             close = difflib.get_close_matches(a, sorted(KNOWN_FLAGS), n=1, cutoff=0.6)
             hint = f"  Did you mean: {close[0]}" if close else ""
             print(f"  ERROR: unrecognized flag: {a}")
