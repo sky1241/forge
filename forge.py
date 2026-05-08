@@ -952,13 +952,15 @@ def run_tests(root: Path, verbose: bool = False) -> dict[str, Any]:
     cmd.extend([test_target] if isinstance(test_target, str) else test_target)
     cmd.extend(["-v", "--tb=short"])
     # --timeout requires pytest-timeout; skip if not installed (silent crash otherwise).
-    # Optional dep without a published type stub — `# type: ignore[import-not-found]`
-    # silences mypy strict; runtime is protected by the try/except ImportError.
-    try:
-        import pytest_timeout  # type: ignore[import-not-found]  # noqa: F401
+    # Probe via importlib.util.find_spec rather than `try: import pytest_timeout`
+    # to keep mypy --strict happy across both mypy versions and both install
+    # states. The bare-import path needed `# type: ignore[import-not-found,
+    # import-untyped]`, but that triggered `unused-ignore` whichever code
+    # didn't fire on a given env (cycle 4 H6 / B12). find_spec is stdlib-typed
+    # and returns None when the module isn't importable — zero ignore needed.
+    import importlib.util
+    if importlib.util.find_spec("pytest_timeout") is not None:
         cmd.append(f"--timeout={cfg['pytest_per_test_timeout_seconds']}")
-    except ImportError:
-        pass
     # Optional pytest -k expression via env var (e.g. to skip slow integration tests)
     test_filter = _get_test_filter()
     if test_filter:

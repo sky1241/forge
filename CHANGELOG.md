@@ -8,6 +8,31 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.0.2] - 2026-05-08
+
+Patch release that fixes a cross-version mypy strict regression
+caught immediately after v1.0.1 was tagged. The v1.0.1 claim "mypy
+strict pass" only held on a venv where pytest-timeout wasn't
+installed AND mypy was 2.0. On a fresh clone with `[dev]` extras
+(pytest-timeout installed) and mypy 1.20.x, the strict-mode
+test_mypy_strict_on_forge failed with two errors at the
+pytest-timeout import.
+
+### Fixed
+- **`pytest-timeout` import probe is now stdlib-typed** —
+  `importlib.util.find_spec("pytest_timeout")` replaces the
+  `try: import pytest_timeout` + `# type: ignore[import-not-found]`
+  pair that broke under mypy 1.20.x when the package was installed
+  without stubs. Combined-code ignores (e.g.
+  `[import-not-found,import-untyped]`) didn't help either: whichever
+  code didn't fire on a given env triggered `unused-ignore` under
+  strict mode. find_spec sidesteps the whole class of issues.
+  (cycle 4 H6, B12)
+- **Zero `# type: ignore` left in forge.py.** The L958 site was the
+  last one; the comment block at L955-961 documents the rationale
+  for the find_spec swap so a future reader doesn't reach for the
+  bare-import pattern again.
+
 ## [1.0.1] - 2026-05-08
 
 Patch release that fixes 8 audit findings caught after v1.0.0 was
@@ -203,6 +228,7 @@ mypy `--strict` passes the entire codebase.
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/sky1241/forge/releases/tag/v1.0.2
 [1.0.1]: https://github.com/sky1241/forge/releases/tag/v1.0.1
 [1.0.0]: https://github.com/sky1241/forge/releases/tag/v1.0.0
