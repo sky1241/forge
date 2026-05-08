@@ -206,9 +206,17 @@ def _load_forge_config_with_sources(root: Path) -> tuple[dict[str, Any], set[str
         return cfg, overridden
     try:
         user = load_json(str(config_path)) or {}
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        # Pre-H-3: silent fall-through. The user thought their config
+        # was loaded; in reality every knob was at its default. This
+        # warning surfaces the failure without escalating to a hard
+        # crash (CI flows that tolerate missing config still work).
+        print(f"  Warning: .forge/config.json unreadable ({e}); "
+              f"using defaults")
         return cfg, overridden
     if not isinstance(user, dict):
+        print("  Warning: .forge/config.json must be a JSON object; "
+              "using defaults")
         return cfg, overridden
     unknown = []
     for key, value in user.items():
@@ -797,7 +805,12 @@ def _iter_numstat_commits(raw_log: str) -> Iterator[dict[str, Any]]:
 
 
 def find_repo_root() -> Path:
-    """Walk up to find .git directory. Also check script's own location."""
+    """Walk up to find .git directory. Also check script's own location.
+
+    Falls back to cwd with an explicit warning when no .git is found
+    anywhere up the chain. Without the warning, git-backed subcommands
+    (--carmack / --predict / --anomaly / --bisect) emitted cryptic
+    "Git not available" lines mid-output (cycle 4 H-3 / B4)."""
     # First try CWD
     p = Path.cwd()
     while p != p.parent:
@@ -810,6 +823,9 @@ def find_repo_root() -> Path:
         if (p / ".git").exists():
             return p
         p = p.parent
+    print("  Warning: not in a git repo (.git/ not found walking up). "
+          "Git-backed subcommands (--carmack/--predict/--anomaly/--bisect) "
+          "will fail. Run from inside a git repo, or `git init` here first.")
     return Path.cwd()
 
 
@@ -1181,7 +1197,7 @@ def print_report(results: dict[str, Any], baseline: dict[str, Any] | None = None
                         print(f"      {line}")
             print()
             return
-        print("\n  NO TESTS FOUND. Run: forge.py --init\n")
+        print("\n  NO TESTS FOUND. Run: forge --init\n")
         return
 
     # Header
@@ -1273,7 +1289,7 @@ def init_repo(root: Path) -> None:
     # .gitignore for .forge/
     gitignore = forge_dir / ".gitignore"
     if not gitignore.exists():
-        gitignore.write_text("*\n")
+        gitignore.write_text("*\n", encoding="utf-8")
 
     # BUGS.md
     bugs_path = root / BUGS_FILE
@@ -1300,7 +1316,7 @@ def init_repo(root: Path) -> None:
     tests_dir = root / "tests"
     if not tests_dir.exists():
         tests_dir.mkdir()
-        (tests_dir / "__init__.py").write_text("")
+        (tests_dir / "__init__.py").write_text("", encoding="utf-8")
         print(f"  Created tests/")
 
     print(f"  Forge initialized in {root.name}")
@@ -4061,7 +4077,7 @@ def main() -> None:
         if baseline:
             print("  (Diff shown above in report)")
         else:
-            print("  No baseline found. Run: forge.py --baseline")
+            print("  No baseline found. Run: forge --baseline")
 
     # Exit code: non-zero if failures
     if results["failed"] > 0 or results["errors"] > 0:
