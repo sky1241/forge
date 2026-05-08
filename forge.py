@@ -177,6 +177,14 @@ FORGE_CONFIG_DEFAULTS = {
     # `--mutate <path>` explicitly, since mutation testing on a 2k-line
     # file can take hours. Bumped or lowered per repo discipline.
     "full_cycle_small_file_loc_threshold": 200,
+    # Cycle 5 K-4 (B17): Newman-Girvan Q verdict bands for `forge --modularity`.
+    # Q ≥ good → "good — modules are well isolated";
+    # poor ≤ Q < good → "fair — some coupling";
+    # Q < poor → "low — code is tightly coupled".
+    # Defaults from Newman 2006 empirical bands; override for stricter or
+    # more permissive policies in `.forge/config.json`.
+    "modularity_q_good_threshold": 0.30,
+    "modularity_q_poor_threshold": 0.15,
 }
 
 
@@ -637,13 +645,20 @@ def _modularity_contribution(graph: dict[str, list[str]]) -> dict[str, float]:
     return {f: max(contrib.get(f, 0.0), 0.0) / max_pos for f in graph}
 
 
-def measure_modularity(root: Path) -> dict[str, Any]:
+def measure_modularity(
+    root: Path, cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Cycle 5 P3: surface Newman-Girvan Q-modularity over the import graph
     as a top-level signal. Uses _build_import_graph + _louvain_clustering
     + _modularity_q (already implemented for predict_carmack) and packages
     the result for the --modularity sub-command.
 
-    Q ≥ 0.30 means well-isolated modules (good architecture). Q < 0.15
+    Cycle 5 K-4 (B17): verdict thresholds are now cfg-tunable via
+    `modularity_q_good_threshold` and `modularity_q_poor_threshold` in
+    `.forge/config.json`. Defaults 0.30 / 0.15 unchanged.
+
+    Q ≥ good_threshold means well-isolated modules (good architecture).
+    Q < poor_threshold
     means the codebase is tightly coupled (mutations propagate, bug fixes
     have unexpected side-effects). Newman 2006 "Modularity and community
     structure in networks" defines the metric; Q ranges in [-0.5, 1] but
@@ -652,6 +667,10 @@ def measure_modularity(root: Path) -> dict[str, Any]:
     Returns a dict with: q, verdict ('good'/'fair'/'low'/'empty'/'no edges'),
     n_files, n_communities, top_clusters (list of {id, size, q_contribution}).
     """
+    if cfg is None:
+        cfg = _load_forge_config(root)
+    good_t = cfg["modularity_q_good_threshold"]
+    poor_t = cfg["modularity_q_poor_threshold"]
     graph = _build_import_graph(root)
     if not graph:
         return {
@@ -695,11 +714,12 @@ def measure_modularity(root: Path) -> dict[str, Any]:
     if two_m > 0:
         cluster_q = {c: q_val / two_m for c, q_val in cluster_q.items()}
 
-    # Verdict thresholds per Sky's brief — empirical bands, not statistical
-    # tests. A user staring at Q = 0.42 wants "good" not "p < 0.05".
-    if q >= 0.30:
+    # Verdict thresholds — cfg-tunable since cycle 5 K-4 (B17). Defaults
+    # 0.30 / 0.15 from Newman 2006 empirical bands. Override in
+    # .forge/config.json for stricter or looser policies.
+    if q >= good_t:
         verdict = "good"
-    elif q >= 0.15:
+    elif q >= poor_t:
         verdict = "fair"
     else:
         verdict = "low"
@@ -716,6 +736,8 @@ def measure_modularity(root: Path) -> dict[str, Any]:
         "n_files": len(graph),
         "n_communities": len(set(partition.values())),
         "top_clusters": top_clusters,
+        "good_threshold": good_t,
+        "poor_threshold": poor_t,
     }
 
 
@@ -734,12 +756,14 @@ def print_modularity_report(root: Path) -> None:
               "Q is undefined. Try after the codebase has some structure.")
         return
     q = result["q"]
+    good_t = result["good_threshold"]
+    poor_t = result["poor_threshold"]
     if result["verdict"] == "good":
-        verdict_msg = f"good — modules are well isolated (Q ≥ 0.30)"
+        verdict_msg = f"good — modules are well isolated (Q ≥ {good_t:.2f})"
     elif result["verdict"] == "fair":
-        verdict_msg = f"fair — some coupling (0.15 ≤ Q < 0.30)"
+        verdict_msg = f"fair — some coupling ({poor_t:.2f} ≤ Q < {good_t:.2f})"
     else:
-        verdict_msg = f"low — code is tightly coupled (Q < 0.15)"
+        verdict_msg = f"low — code is tightly coupled (Q < {poor_t:.2f})"
     print(f"  Q = {q:.3f} ({verdict_msg})")
     print(f"  {result['n_files']} files in {result['n_communities']} communities\n")
     print(f"  Top {len(result['top_clusters'])} communities by size:")

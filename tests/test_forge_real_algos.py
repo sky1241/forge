@@ -3343,3 +3343,41 @@ class TestCycle5P3Modularity:
         assert "Traceback" not in capsys.readouterr().err
         assert ("No tracked" in out or "no inter-file imports" in out
                 or "Q =" in out)
+
+    def test_modularity_default_thresholds_match_newman_2006(self, tmp_path):
+        """Defaults Q≥0.30 = good, Q<0.15 = low (Newman 2006 bands).
+        Pre-K-4 these were hardcoded literals; now they live in
+        FORGE_CONFIG_DEFAULTS and are surfaced in the result dict."""
+        _git_init(tmp_path)
+        # Trivial 2-file graph so the function reaches the verdict path
+        (tmp_path / "a.py").write_text("import b\n")
+        (tmp_path / "b.py").write_text("import a\n")
+        _git_commit(tmp_path)
+        result = forge.measure_modularity(tmp_path)
+        assert result["good_threshold"] == 0.30
+        assert result["poor_threshold"] == 0.15
+
+    def test_modularity_thresholds_overridable_via_config(self, tmp_path):
+        """`.forge/config.json` overrides should propagate to both the
+        verdict logic and the result dict's surfaced thresholds. With
+        good=0.10 (very permissive), even a low-Q graph reads as 'good'."""
+        _git_init(tmp_path)
+        # Synthetic graph with a deliberately low Q (single chain)
+        (tmp_path / "a.py").write_text("import b\n")
+        (tmp_path / "b.py").write_text("import c\n")
+        (tmp_path / "c.py").write_text("import d\n")
+        (tmp_path / "d.py").write_text("# leaf\n")
+        (tmp_path / ".forge").mkdir()
+        (tmp_path / ".forge" / "config.json").write_text(
+            '{"modularity_q_good_threshold": 0.10,'
+            ' "modularity_q_poor_threshold": 0.05}',
+            encoding="utf-8",
+        )
+        _git_commit(tmp_path)
+        result = forge.measure_modularity(tmp_path)
+        assert result["good_threshold"] == 0.10
+        assert result["poor_threshold"] == 0.05
+        # With permissive thresholds, even a chain graph qualifies as good
+        # (or fair) — never low. The exact verdict depends on Louvain
+        # output but the bands are pulled from cfg, not hardcoded.
+        assert result["verdict"] in ("good", "fair")
