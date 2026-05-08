@@ -3256,6 +3256,36 @@ class TestCycle5P1PathsToMutate:
         out = capsys.readouterr().out
         assert "must be combined with --mutate" in out
 
+    def test_paths_to_mutate_rejects_symlink_outside_repo(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """B16: a symlink whose target lives OUTSIDE the repo must be
+        rejected by `--paths-to-mutate`. Without this guard, a user
+        could mutate `/etc/passwd` (or any system file) by symlinking
+        it into a forge-managed directory. Path.resolve() follows
+        symlinks, so the inside-repo check via relative_to() should
+        already catch it — this test pins that contract."""
+        # Create a "real" repo dir + a sibling target hors-repo
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "victim.py").write_text("def f(): pass\n", encoding="utf-8")
+        # Symlink inside the repo pointing outside
+        (repo / "link.py").symlink_to(outside / "victim.py")
+
+        monkeypatch.setattr(forge, "find_repo_root", lambda: repo)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["forge", "--mutate", "--paths-to-mutate", "link.py"],
+        )
+        with pytest.raises(SystemExit) as exc:
+            forge.main()
+        # Cycle 5 K-2: usage errors exit 2, not 1.
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "must point to a file inside the repo" in out
+
     def test_paths_to_mutate_nonexistent_file_rejected(
         self, monkeypatch, tmp_path, capsys,
     ):
