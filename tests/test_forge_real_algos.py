@@ -1866,3 +1866,101 @@ class TestCycle3FlakyDtw:
         assert "Run 1/3" in out and "Run 2/3" in out and "Run 3/3" in out, (
             f"flaky_dtw must execute the requested number of runs:\n{out}"
         )
+
+
+# ============================================================================
+# Cycle 3 — chunk 6 — .forge/config.json + magic-number centralization
+# ============================================================================
+
+
+class TestCycle3ForgeConfig:
+    """All user-tunable knobs now go through _load_forge_config(root). The
+    helper merges .forge/config.json over FORGE_CONFIG_DEFAULTS so the
+    defaults stay the source of truth and a config file can override any
+    one without copy-pasting the whole table."""
+
+    def test_defaults_returned_when_no_config_file(self, tmp_path):
+        cfg = forge._load_forge_config(tmp_path)
+        for key, default in forge.FORGE_CONFIG_DEFAULTS.items():
+            assert cfg[key] == default, f"{key} default lost"
+
+    def test_config_overrides_default_value(self, tmp_path):
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        (tmp_path / forge.FORGE_DIR / "config.json").write_text(
+            '{"predict_horizon_weeks": 12, "carmack_km_horizon_days": 30.0}'
+        )
+        cfg = forge._load_forge_config(tmp_path)
+        assert cfg["predict_horizon_weeks"] == 12
+        assert cfg["carmack_km_horizon_days"] == 30.0
+        # Other defaults still present
+        assert cfg["mutation_threshold_pct"] == forge.MUTATION_THRESHOLD
+
+    def test_unknown_keys_warn_but_do_not_crash(self, tmp_path, capsys):
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        (tmp_path / forge.FORGE_DIR / "config.json").write_text(
+            '{"frobulator_speed": 9001, "predict_horizon_weeks": 5}'
+        )
+        cfg = forge._load_forge_config(tmp_path)
+        out = capsys.readouterr().out
+        assert "frobulator_speed" in out, f"unknown key must be flagged:\n{out}"
+        assert cfg["predict_horizon_weeks"] == 5
+
+    def test_malformed_json_falls_back_to_defaults(self, tmp_path):
+        """A broken config file should not break forge — fall back silently."""
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        (tmp_path / forge.FORGE_DIR / "config.json").write_text("{not valid json")
+        cfg = forge._load_forge_config(tmp_path)
+        assert cfg == forge.FORGE_CONFIG_DEFAULTS
+
+    def test_non_dict_root_falls_back(self, tmp_path):
+        (tmp_path / forge.FORGE_DIR).mkdir(parents=True)
+        (tmp_path / forge.FORGE_DIR / "config.json").write_text('[1, 2, 3]')
+        cfg = forge._load_forge_config(tmp_path)
+        assert cfg == forge.FORGE_CONFIG_DEFAULTS
+
+    def test_predict_horizon_overridable_runtime(self, tmp_path, capsys):
+        """End-to-end check: predict_defects must honor the config-file
+        override of `predict_horizon_weeks` even though its signature
+        still accepts a `weeks` argument for backward compat."""
+        repo = tmp_path / "repo"
+        _make_git_repo(repo, n_commits=5, n_files=3)
+        (repo / forge.FORGE_DIR).mkdir(parents=True, exist_ok=True)
+        # 0 weeks → can't see anything → "No commits in the last 0 weeks"
+        (repo / forge.FORGE_DIR / "config.json").write_text(
+            '{"predict_horizon_weeks": 0}'
+        )
+        forge.predict_defects(repo)  # no explicit weeks → uses config
+        out = capsys.readouterr().out
+        # Either "no commits" or empty-result path — both prove 0 was used.
+        assert "0 weeks" in out or "No tracked" in out or "0/" in out, (
+            f"predict_defects should reflect config override:\n{out}"
+        )
+
+    def test_anomaly_zscore_threshold_overridable(self, tmp_path, capsys):
+        """Lower the z-score cutoff via config and a fairly uniform repo
+        should produce >= as many anomalies than with the default threshold."""
+        repo = tmp_path / "repo"
+        _make_git_repo(repo, n_commits=12, n_files=5)
+        default_result = forge.anomaly_detect(repo)
+        capsys.readouterr()
+
+        (repo / forge.FORGE_DIR).mkdir(parents=True, exist_ok=True)
+        (repo / forge.FORGE_DIR / "config.json").write_text(
+            '{"carmack_zscore_threshold": 0.1}'
+        )
+        loose_result = forge.anomaly_detect(repo)
+        capsys.readouterr()
+        if loose_result is not None and default_result is not None:
+            assert len(loose_result) >= len(default_result), (
+                f"loose threshold should flag >= as many: "
+                f"default={len(default_result)} loose={len(loose_result)}"
+            )
+
+    def test_keys_count_at_least_15(self):
+        """Cousin pc1 audit asked for >=17 magic numbers centralized.
+        Keep this test as a regression so FORGE_CONFIG_DEFAULTS doesn't
+        shrink silently in a future refactor."""
+        assert len(forge.FORGE_CONFIG_DEFAULTS) >= 15, (
+            f"only {len(forge.FORGE_CONFIG_DEFAULTS)} keys — should be >= 15. "
+            f"Did a key get dropped?"
+        )

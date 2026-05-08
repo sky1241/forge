@@ -78,6 +78,70 @@ CARMACK_ZSCORE_THRESHOLD = 2.0  # Anomaly detection z-score cutoff
 # truth: changing it once changes every signal that gates on bugfix-ness.
 BUGFIX_KEYWORDS = ("fix", "bug", "patch", "repair", "crash")
 
+# Default values for every user-tunable knob. Override any of them by
+# writing `.forge/config.json` in the repo, e.g. `{"predict_horizon_weeks":
+# 12, "test_runner_timeout_seconds": 900}`. Read once at startup via
+# _load_forge_config(root); each subcommand asks the helper instead of
+# referring to a magic literal in its own body.
+FORGE_CONFIG_DEFAULTS = {
+    # Mutation testing (Offutt 1996)
+    "mutation_threshold_pct": MUTATION_THRESHOLD,  # kill rate to PASS
+    "mutation_per_target_timeout_seconds": None,   # None = derive from baseline
+    # Fault localization (Abreu 2007)
+    "ochiai_top_n": OCHIAI_TOP_N,
+    # Test minimization (Zeller 2002)
+    "minimize_max_iter": MINIMIZE_MAX_ITER,
+    # Defect prediction (Nagappan 2005 + cousin pc1 cycle 2 hardening)
+    "predict_horizon_weeks": 8,
+    "predict_min_loc_floor": 10,
+    # CARMACK pipeline (Kalman + Wavelet + KM + Modularity)
+    "carmack_kalman_q": CARMACK_KALMAN_Q,
+    "carmack_kalman_r": CARMACK_KALMAN_R,
+    "carmack_km_horizon_days": 14.0,
+    "carmack_dtw_threshold": CARMACK_DTW_THRESHOLD,
+    "carmack_zscore_threshold": CARMACK_ZSCORE_THRESHOLD,
+    "small_repo_min_active_files": 6,
+    "small_repo_min_commits": 10,
+    "small_repo_min_distinct_days": 7,
+    # Flaky detection
+    "flaky_runs": 5,
+    "flaky_dtw_runs": 5,
+    # Subprocess timeouts (seconds)
+    "test_runner_timeout_seconds": 600,
+    "pytest_per_test_timeout_seconds": 30,
+    "bisect_iteration_timeout_seconds": 120,
+    "impacted_tests_timeout_seconds": 300,
+    "snapshot_command_timeout_seconds": 60,
+}
+
+
+def _load_forge_config(root):
+    """Read .forge/config.json (if present) and merge over the defaults.
+    Unknown keys are ignored with a warning so a typo doesn't silently
+    flip a behavior. Returns a flat dict with every key in
+    FORGE_CONFIG_DEFAULTS guaranteed to be present.
+    """
+    cfg = dict(FORGE_CONFIG_DEFAULTS)
+    config_path = Path(root) / FORGE_DIR / "config.json"
+    if not config_path.exists():
+        return cfg
+    try:
+        user = load_json(str(config_path)) or {}
+    except (OSError, ValueError):
+        return cfg
+    if not isinstance(user, dict):
+        return cfg
+    unknown = []
+    for key, value in user.items():
+        if key in cfg:
+            cfg[key] = value
+        else:
+            unknown.append(key)
+    if unknown:
+        print(f"  WARNING: .forge/config.json has unknown keys (ignored): "
+              f"{', '.join(sorted(unknown))}")
+    return cfg
+
 
 # === CARMACK MOVES — Cross-domain algorithms ===
 # Wavelet (signal processing), Kalman (aerospace), Kaplan-Meier (medicine),
@@ -638,6 +702,7 @@ def find_tests(root):
 
 def run_tests(root, verbose=False):
     """Run pytest and capture structured results."""
+    cfg = _load_forge_config(root)
     test_files = find_tests(root)
     if not test_files:
         # Fallback: check if CWD has tests
@@ -654,7 +719,7 @@ def run_tests(root, verbose=False):
     # --timeout requires pytest-timeout; skip if not installed (silent crash otherwise)
     try:
         import pytest_timeout  # noqa: F401
-        cmd.append("--timeout=30")
+        cmd.append(f"--timeout={cfg['pytest_per_test_timeout_seconds']}")
     except ImportError:
         pass
     # Optional pytest -k expression via env var (e.g. to skip slow integration tests)
@@ -665,7 +730,8 @@ def run_tests(root, verbose=False):
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, cwd=str(root),
-            timeout=600, encoding="utf-8", errors="replace"
+            timeout=cfg["test_runner_timeout_seconds"],
+            encoding="utf-8", errors="replace"
         )
         output = result.stdout + result.stderr
         rc = result.returncode
@@ -1049,9 +1115,11 @@ def log_run(root, results):
 
 
 # === FLAKY TEST DETECTION ===
-def detect_flaky(root, runs=5):
+def detect_flaky(root, runs=None):
     """Run tests N times, find tests that flip between pass/fail.
     Flaky tests are the #1 trust killer in CI — Luo et al. 2014."""
+    if runs is None:
+        runs = _load_forge_config(root)["flaky_runs"]
     print(f"  Running tests {runs} times to detect flaky tests...")
     all_failures = []
     for i in range(runs):
@@ -1502,10 +1570,13 @@ def snapshot_check(root):
 
 
 # === AXE 5: DEFECT PREDICTION (Nagappan & Ball 2005, Hassan 2009) ===
-def predict_defects(root, weeks=8):
+def predict_defects(root, weeks=None):
     """Predict which files are most likely to have bugs based on git history.
     Uses: relative churn, change frequency, change bursts, author count,
     bugfix frequency, LOC, recency. Nagappan & Ball ICSE 2005."""
+    cfg = _load_forge_config(root)
+    if weeks is None:
+        weeks = cfg["predict_horizon_weeks"]
     # Get tracked Python files
     tracked = _run_git(root, "ls-files", "*.py")
     if not tracked:
@@ -1544,11 +1615,11 @@ def predict_defects(root, weeks=8):
     # change, churn_rel = 2 (1 added + 1 deleted)/1 ≈ 2.0 — completely
     # disproportionate to real risk. Cap loc at >= MIN_PREDICT_LOC for the
     # ratio so trivial files can't dominate the ranking.
-    MIN_PREDICT_LOC = 10
+    min_loc_floor = cfg["predict_min_loc_floor"]
     for f, s in file_stats.items():
         if not s["commits"]:
             continue
-        churn_rel = (s["added"] + s["deleted"]) / max(s["loc"], MIN_PREDICT_LOC)
+        churn_rel = (s["added"] + s["deleted"]) / max(s["loc"], min_loc_floor)
         freq = len(s["commits"])
         # Change burst: max commits within any 48h window
         burst = 0
@@ -2548,12 +2619,15 @@ def fault_locate(root):
 
 
 # === CARMACK: ENHANCED DEFECT PREDICTION (Kalman + Wavelet + KM + Modularity) ===
-def predict_carmack(root, weeks=8):
+def predict_carmack(root, weeks=None):
     """Cross-domain defect prediction. Replaces fixed weights with:
     - Kalman filter (adaptive risk from bugfix signal)
     - Haar wavelet (multi-scale churn decomposition)
     - Kaplan-Meier (survival probability per file)
     - Newman modularity (import graph coupling)"""
+    cfg = _load_forge_config(root)
+    if weeks is None:
+        weeks = cfg["predict_horizon_weeks"]
     tracked = _run_git(root, "ls-files", "*.py")
     if not tracked:
         print("  No tracked .py files found.")
@@ -2668,8 +2742,8 @@ def predict_carmack(root, weeks=8):
                 if not last_event and now_ts > 0:
                     obs.append(((now_ts - baseline_ts) / 86400.0, False))
                 km_curve = _kaplan_meier(obs)
-                survival_14d = _km_survival_at(km_curve, 14.0)
-                crash_prob = 1.0 - survival_14d
+                survival_at = _km_survival_at(km_curve, cfg["carmack_km_horizon_days"])
+                crash_prob = 1.0 - survival_at
         except (ValueError, TypeError):
             pass
 
@@ -2722,7 +2796,9 @@ def predict_carmack(root, weeks=8):
     n_active = len(results)
     total_commits = sum(r["freq"] for r in results)
     distinct_days_total = len({d for s in file_stats.values() for d in s["daily_churn"]})
-    small_repo = n_active < 6 or total_commits < 10 or distinct_days_total < 7
+    small_repo = (n_active < cfg["small_repo_min_active_files"]
+                  or total_commits < cfg["small_repo_min_commits"]
+                  or distinct_days_total < cfg["small_repo_min_distinct_days"])
     n_graph_nodes = len(graph)
 
     bar = "=" * 60
@@ -2746,9 +2822,12 @@ def predict_carmack(root, weeks=8):
 
 
 # === CARMACK: UNIFIED ANOMALY DETECTION (z-score outliers) ===
-def anomaly_detect(root, weeks=8):
+def anomaly_detect(root, weeks=None):
     """All axes are anomaly detection in disguise.
     Z-score across git metrics — flag files with z > 2.0 on 2+ metrics."""
+    cfg = _load_forge_config(root)
+    if weeks is None:
+        weeks = cfg["predict_horizon_weeks"]
     tracked = _run_git(root, "ls-files", "*.py")
     if not tracked:
         print("  No tracked .py files found.")
@@ -2803,6 +2882,7 @@ def anomaly_detect(root, weeks=8):
         means[k] = mean
         stds[k] = std if std > 0 else 1.0
 
+    z_threshold = cfg["carmack_zscore_threshold"]
     anomalies = []
     for i, (f, m) in enumerate(zip(active_files, metrics_list)):
         z_scores = {}
@@ -2810,7 +2890,7 @@ def anomaly_detect(root, weeks=8):
         for k in keys:
             z = (m[k] - means[k]) / stds[k]
             z_scores[k] = z
-            if abs(z) > CARMACK_ZSCORE_THRESHOLD:
+            if abs(z) > z_threshold:
                 flags += 1
         if flags >= 2:
             anomalies.append({"file": f, "z_scores": z_scores, "flags": flags, "metrics": m})
@@ -2822,11 +2902,11 @@ def anomaly_detect(root, weeks=8):
     print(f"  ANOMALY DETECTION — z-score outliers ({len(active_files)} active files)")
     print(f"{bar}")
     if not anomalies:
-        print(f"  No anomalies detected (threshold: z > {CARMACK_ZSCORE_THRESHOLD} on 2+ metrics)")
+        print(f"  No anomalies detected (threshold: z > {z_threshold} on 2+ metrics)")
     else:
         for a in anomalies[:10]:
             flags_str = " ".join(f"{k}={a['z_scores'][k]:+.1f}"
-                                 for k in keys if abs(a['z_scores'][k]) > CARMACK_ZSCORE_THRESHOLD)
+                                 for k in keys if abs(a['z_scores'][k]) > z_threshold)
             print(f"  ANOMALY  {a['file']}")
             print(f"           {a['flags']} flags: {flags_str}")
             m = a['metrics']
@@ -2837,9 +2917,11 @@ def anomaly_detect(root, weeks=8):
 
 
 # === CARMACK: FLAKY DTW — Temporal pattern matching ===
-def flaky_dtw(root, runs=5):
+def flaky_dtw(root, runs=None):
     """Enhanced flaky detection with DTW temporal pattern matching.
     Tests with similar pass/fail sequences = likely same root cause."""
+    if runs is None:
+        runs = _load_forge_config(root)["flaky_dtw_runs"]
     test_sequences = {}
 
     for run_num in range(runs):
