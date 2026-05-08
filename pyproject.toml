@@ -7,7 +7,7 @@ name = "forge-shield"
 version = "0.1.0"
 description = "Pytest regression shield with predictive analytics — Louvain communities, Kaplan-Meier survival, adaptive Kalman over git history"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "sky1241" }]
 keywords = [
@@ -26,15 +26,23 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: Quality Assurance",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-timeout>=2.0", "coverage>=7.0", "hypothesis>=6.0", "mutmut>=2.4"]
+dev = [
+    "pytest>=7.0",
+    "pytest-timeout>=2.0",
+    "pytest-cov>=4.0",
+    "coverage>=7.0",
+    "hypothesis>=6.0",
+    "mutmut>=2.4",
+    "mypy>=1.0",
+]
 
 [project.scripts]
 forge = "forge:main"
@@ -46,3 +54,11 @@ Repository = "https://github.com/sky1241/forge"
 
 [tool.setuptools]
 py-modules = ["forge"]
+
+[tool.pytest.ini_options]
+# Cycle 4 C-C: mark slow tests (e.g. mypy --strict subprocess) so they
+# don't run by default. Use `pytest -m slow` to invoke them explicitly.
+markers = [
+    "slow: tests that take >5s — run with `pytest -m slow` (excluded from default suite)",
+]
+addopts = "-m 'not slow'"
