@@ -2970,27 +2970,31 @@ def run_mutation(
 
 
 # === AXE 4: SPECTRUM-BASED FAULT LOCALIZATION / Ochiai (Abreu et al. 2007) ===
-def fault_locate(root: Path) -> None:
+def fault_locate(root: Path) -> bool:
     """Locate suspicious lines using Ochiai SBFL formula.
     suspiciousness(s) = failed(s) / sqrt(total_failed * (failed(s) + passed(s)))
-    Uses coverage.data.CoverageData for per-test context (10x faster than per-test runs)."""
+    Uses coverage.data.CoverageData for per-test context (10x faster than per-test runs).
+
+    Returns False if a required dep is missing (coverage / pytest-cov);
+    callers can `sys.exit(1)` on that. Returns True for "ran successfully"
+    even if there's nothing to localize (no failing tests / no suspects /
+    timeout / collection error) — those aren't dep failures."""
     cfg = _load_forge_config(root)
     top_n = cfg["ochiai_top_n"]
     cov_mod = _check_dep("coverage")
     if not cov_mod:
-        return
+        return False
 
-    # Check pytest-cov
     try:
         __import__("pytest_cov")
     except ImportError:
-        print("  pytest-cov not installed. Install with: pip install pytest-cov")
-        return
+        print("  pytest-cov not installed. Install with: pip install 'forge-shield[locate]'")
+        return False
 
     test_files = find_tests(root)
     if not test_files:
         print("  No tests found.")
-        return
+        return True
 
     # Clean old coverage data
     cov_file = root / ".coverage"
@@ -3022,7 +3026,7 @@ def fault_locate(root: Path) -> None:
         print(f"    - FORGE_TEST_FILTER='specific_test_name' forge --locate")
         print(f"    - run forge default first to identify failing tests, then filter")
         print(f"    - reduce test_files (delete unused tests/ subdirs in this repo)\n")
-        return
+        return True
 
     # Parse test results to know which tests passed/failed
     failed_tests = set()
@@ -3052,9 +3056,9 @@ def fault_locate(root: Path) -> None:
             print(f"  Hint: a test file in your repo crashed at collection")
             print(f"  (missing dep, plugin conflict, mypy_test_cases/ not for normal pytest...).")
             print(f"  Try FORGE_TEST_FILTER='specific_test' or fix the broken collector.\n")
-            return
+            return True
         print("  No failing tests. Nothing to localize.")
-        return
+        return True
 
     total_failed = len(failed_tests)
 
@@ -3065,7 +3069,7 @@ def fault_locate(root: Path) -> None:
         cd.read()
     except Exception as e:
         print(f"  Coverage data not readable: {e}")
-        return
+        return True
 
     # Normalize test IDs: coverage contexts use "path::test|run" format
     def _match_test(ctx_name: str, test_set: set[str]) -> bool:
@@ -3120,7 +3124,7 @@ def fault_locate(root: Path) -> None:
 
     if not suspects:
         print("  No suspicious lines found (coverage data may be incomplete).")
-        return
+        return True
 
     suspects.sort(key=lambda x: x["score"], reverse=True)
 
@@ -3155,6 +3159,7 @@ def fault_locate(root: Path) -> None:
         print(f"  {s['score']:.2f}  {s['file']}:{s['line']}  {src_line[:60]}")
         print(f"       {s['failed']}/{total_failed} fail, {s['passed']}/{len(passed_tests)} pass — {label}")
     print(f"{bar}\n")
+    return True
 
 
 # === CARMACK: ENHANCED DEFECT PREDICTION (Kalman + Wavelet + KM + Modularity) ===
@@ -3977,12 +3982,15 @@ def main() -> None:
         target = args[idx + 1] if idx + 1 < len(args) and not args[idx + 1].startswith("-") else None
         cfg = _load_forge_config(root)
         score = run_mutation(root, target, cfg=cfg)
-        if score is not None and score < cfg["mutation_threshold_pct"]:
+        if score is None:
+            sys.exit(1)
+        if score < cfg["mutation_threshold_pct"]:
             sys.exit(1)
         return
 
     if "--locate" in args:
-        fault_locate(root)
+        if not fault_locate(root):
+            sys.exit(1)
         return
 
     if "--watch" in args:

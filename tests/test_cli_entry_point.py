@@ -48,6 +48,38 @@ def _run_forge(
     )
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(scope="module")
+def core_only_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A throwaway venv with forge installed core-only — no `[mutate]` /
+    `[locate]` / `[fuzz]` extras. Returned path is the venv's `forge`
+    entry point. Used to test cycle 4 H-1 fail-fast exit codes when an
+    optional dep is missing (libcst → --mutate; coverage → --locate)."""
+    venv_path = tmp_path_factory.mktemp("core_only_venv")
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(venv_path)],
+        check=True, capture_output=True,
+    )
+    venv_python = venv_path / "bin" / "python"
+    if not venv_python.exists():
+        # Windows venv layout — same logic, different bin dir name
+        venv_python = venv_path / "Scripts" / "python.exe"
+    subprocess.run(
+        [str(venv_python), "-m", "ensurepip"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "-e", str(_REPO_ROOT), "--quiet"],
+        check=True, capture_output=True,
+    )
+    forge_bin = venv_path / "bin" / "forge"
+    if not forge_bin.exists():
+        forge_bin = venv_path / "Scripts" / "forge.exe"
+    return forge_bin
+
+
 def _make_minimal_repo(root: Path) -> None:
     """Init a git repo at root with one source file and one passing test
     so `forge --baseline` has something to time."""
@@ -148,5 +180,76 @@ class TestCliEntryPoint:
         combined = (result.stdout + result.stderr).lower()
         assert "frobulate" in combined or "unknown" in combined, (
             f"validator didn't surface unknown flag name:\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+
+class TestCycle4H1ExitCodesOnMissingDeps:
+    """Cycle 4 H-1: pin that `forge --mutate` and `forge --locate` exit
+    non-zero when their optional dep is missing.
+
+    Pre-H-1 the install hint was clean ("install forge[mutate]"), but
+    the exit code was 0 — `forge --mutate && deploy` would silently
+    succeed in a CI script and ship an unverified build.
+
+    Each test runs the CLI in a throwaway venv where forge is installed
+    core-only (no extras), via the `core_only_venv` module-scope fixture.
+    The fixture cost (~5s for venv create + pip install -e) is amortized
+    across the tests in this class."""
+
+    def test_mutate_without_libcst_exits_nonzero(
+        self, core_only_venv: Path, tmp_path: Path,
+    ) -> None:
+        """`forge --mutate` without libcst returns exit code != 0 and
+        surfaces the install hint, instead of exit 0 + silent skip."""
+        target = tmp_path / "target.py"
+        target.write_text("def add(a, b):\n    return a + b\n")
+        result = subprocess.run(
+            [str(core_only_venv), "--mutate", str(target)],
+            capture_output=True, text=True, timeout=30, cwd=str(tmp_path),
+        )
+        assert result.returncode != 0, (
+            f"forge --mutate without libcst should exit non-zero;\n"
+            f"got {result.returncode}\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+        combined = result.stdout + result.stderr
+        assert "forge-shield[mutate]" in combined or "libcst" in combined, (
+            f"install hint not surfaced:\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    def test_locate_without_coverage_exits_nonzero(
+        self, core_only_venv: Path, tmp_path: Path,
+    ) -> None:
+        """`forge --locate` without coverage returns exit code != 0 and
+        surfaces the install hint."""
+        # --locate needs a git repo to find tests; minimal scaffold
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        (tmp_path / "main.py").write_text("def f(): return 1\n")
+        (tmp_path / "test_main.py").write_text(
+            "from main import f\n"
+            "def test_f(): assert f() == 1\n"
+        )
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "-q", "-m", "init"],
+            cwd=tmp_path, check=True,
+        )
+        result = subprocess.run(
+            [str(core_only_venv), "--locate"],
+            capture_output=True, text=True, timeout=30, cwd=str(tmp_path),
+        )
+        assert result.returncode != 0, (
+            f"forge --locate without coverage should exit non-zero;\n"
+            f"got {result.returncode}\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+        combined = result.stdout + result.stderr
+        assert "coverage" in combined.lower() or "forge-shield[locate]" in combined, (
+            f"install hint not surfaced:\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
