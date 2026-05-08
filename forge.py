@@ -45,10 +45,11 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
+from typing import Any, Iterator
 import ast
 import math
 
-def _safe_path(filepath) -> str:
+def _safe_path(filepath: str | Path) -> str:
     """Sanitize path for display — never show absolute paths."""
     p = Path(filepath)
     parts = p.parts
@@ -162,7 +163,7 @@ FORGE_CONFIG_DEFAULTS = {
 }
 
 
-def _load_forge_config(root):
+def _load_forge_config(root: Path) -> dict[str, Any]:
     """Read .forge/config.json (if present) and merge over the defaults.
     Unknown keys are ignored with a warning so a typo doesn't silently
     flip a behavior. Returns a flat dict with every key in
@@ -172,7 +173,7 @@ def _load_forge_config(root):
     return cfg
 
 
-def _load_forge_config_with_sources(root):
+def _load_forge_config_with_sources(root: Path) -> tuple[dict[str, Any], set[str]]:
     """Same as _load_forge_config but also returns the set of keys
     that came from `.forge/config.json` (vs defaults). Lets callers
     annotate prints with `(from .forge/config.json)` vs `(default)`
@@ -182,7 +183,7 @@ def _load_forge_config_with_sources(root):
     Returns (cfg: dict, overridden: set[str]).
     """
     cfg = dict(FORGE_CONFIG_DEFAULTS)
-    overridden = set()
+    overridden: set[str] = set()
     config_path = Path(root) / FORGE_DIR / "config.json"
     if not config_path.exists():
         return cfg, overridden
@@ -220,7 +221,7 @@ def _load_forge_config_with_sources(root):
 # Newman modularity (biology), DTW (speech recognition), Hamming (telecom).
 # All pure Python, zero dependencies.
 
-def _haar_wavelet(signal):
+def _haar_wavelet(signal: list[float]) -> tuple[list[float], list[list[float]]]:
     """Haar wavelet decomposition — returns (approximation, detail_coefficients).
     Decomposes churn signal into low-freq (trend) and high-freq (burst)."""
     if len(signal) < 2:
@@ -244,7 +245,7 @@ def _haar_wavelet(signal):
     return current, details
 
 
-def _scalar_kalman(observations, Q=None, R=None):
+def _scalar_kalman(observations: list[float], Q: float | None = None, R: float | None = None) -> list[float]:
     """Scalar Kalman filter — returns smoothed estimates.
     Missile guidance algo from 1960, applied to bug risk estimation.
     Q = process noise (how fast the underlying state can change).
@@ -266,7 +267,12 @@ def _scalar_kalman(observations, Q=None, R=None):
     return estimates
 
 
-def _adaptive_kalman(observations, n_iter=10, Q_init=None, R_init=None):
+def _adaptive_kalman(
+    observations: list[float],
+    n_iter: int = 10,
+    Q_init: float | None = None,
+    R_init: float | None = None,
+) -> tuple[list[float], float, float]:
     """Kalman filter with Q,R estimated from data via EM-style iteration.
     Useful when default Q,R don't match the true noise structure of the signal.
 
@@ -331,7 +337,7 @@ def _adaptive_kalman(observations, n_iter=10, Q_init=None, R_init=None):
     return x_post, Q, R
 
 
-def _kaplan_meier(observations):
+def _kaplan_meier(observations: list[tuple[float, bool]] | list[float]) -> list[tuple[float, float]]:
     """Kaplan-Meier survival estimator with censoring (Kaplan & Meier 1958).
 
     `observations` is a list of (time, event_observed) where:
@@ -377,7 +383,7 @@ def _kaplan_meier(observations):
     return curve
 
 
-def _km_survival_at(curve, horizon):
+def _km_survival_at(curve: list[tuple[float, float]], horizon: float) -> float:
     """Read S(horizon) from a KM curve. Step function (last value <= horizon)."""
     s = 1.0
     for t, val in curve:
@@ -388,7 +394,7 @@ def _km_survival_at(curve, horizon):
     return s
 
 
-def _dtw_distance(seq_a, seq_b):
+def _dtw_distance(seq_a: list[float], seq_b: list[float]) -> float:
     """Dynamic Time Warping distance (speech recognition).
     Compares temporal patterns of test results."""
     n, m = len(seq_a), len(seq_b)
@@ -403,7 +409,7 @@ def _dtw_distance(seq_a, seq_b):
     return dtw[n][m]
 
 
-def _hamming_severity(original, mutated):
+def _hamming_severity(original: str, mutated: str) -> int:
     """Character-level edit distance (telecom).
     Higher distance = more severe mutation = harder to detect."""
     dist = 0
@@ -414,7 +420,7 @@ def _hamming_severity(original, mutated):
     return dist
 
 
-def _build_import_graph(root):
+def _build_import_graph(root: Path) -> dict[str, list[str]]:
     """Build directed graph of Python imports using AST.
     Returns {file: [imported_files]}."""
     tracked = _run_git(root, "ls-files", "*.py")
@@ -428,7 +434,7 @@ def _build_import_graph(root):
         parts = mod.split(".")
         if parts[-1] != "__init__":
             mod_to_file[parts[-1]] = f
-    graph = {f: [] for f in files}
+    graph: dict[str, list[str]] = {f: [] for f in files}
     for f in files:
         fpath = root / f
         if not fpath.exists():
@@ -452,7 +458,7 @@ def _build_import_graph(root):
     return graph
 
 
-def _modularity_q(adj, partition, two_m):
+def _modularity_q(adj: dict[str, dict[str, float]], partition: dict[str, int], two_m: float) -> float:
     """Newman-Girvan Q for an undirected graph.
     Q = (1/2m) * Σ_ij [A_ij - k_i*k_j/(2m)] * δ(c_i, c_j)
     adj      : {node: {neighbor: weight}}, undirected (symmetric)
@@ -472,7 +478,11 @@ def _modularity_q(adj, partition, two_m):
     return q / two_m
 
 
-def _louvain_clustering(adj, max_iter=20, tol=1e-7):
+def _louvain_clustering(
+    adj: dict[str, dict[str, float]],
+    max_iter: int = 20,
+    tol: float = 1e-7,
+) -> tuple[dict[str, int], float]:
     """Louvain community detection (Blondel et al. 2008).
     Greedy local optimization of Newman Q.
     adj : {node: {neighbor: weight}}, undirected, symmetric.
@@ -503,7 +513,7 @@ def _louvain_clustering(adj, max_iter=20, tol=1e-7):
             ci = partition[n]
             k_n = degree[n]
             # Sum of weights from n to each community (excluding self-loops)
-            weights_to_comm = {}
+            weights_to_comm: dict[int, float] = {}
             for m, w in adj[n].items():
                 if m == n:
                     continue
@@ -529,8 +539,8 @@ def _louvain_clustering(adj, max_iter=20, tol=1e-7):
                 improved = True
 
     # Renumber communities 0..k-1
-    seen = {}
-    clean = {}
+    seen: dict[int, int] = {}
+    clean: dict[str, int] = {}
     for n, c in partition.items():
         if c not in seen:
             seen[c] = len(seen)
@@ -539,7 +549,7 @@ def _louvain_clustering(adj, max_iter=20, tol=1e-7):
     return clean, q
 
 
-def _modularity_contribution(graph):
+def _modularity_contribution(graph: dict[str, list[str]]) -> dict[str, float]:
     """Per-file score = how much each file contributes to its community's Q.
     Files that strongly bind their cluster get high scores; bridge files (between
     clusters) get low scores. This is the *real* Newman-style coupling signal,
@@ -552,7 +562,7 @@ def _modularity_contribution(graph):
     # Build undirected weighted adjacency in a deterministic order so that
     # downstream Louvain (which depends on insertion order for tie-breaking)
     # produces the same partition on every run.
-    adj = {f: {} for f in sorted(graph)}
+    adj: dict[str, dict[str, float]] = {f: {} for f in sorted(graph)}
     for src in sorted(graph):
         targets = graph[src]
         for tgt in sorted(targets):
@@ -592,7 +602,7 @@ def _modularity_contribution(graph):
     return {f: max(contrib.get(f, 0.0), 0.0) / max_pos for f in graph}
 
 
-def _check_dep(name, pip_name=None):
+def _check_dep(name: str, pip_name: str | None = None) -> Any:
     """Try to import optional dependency, return module or None."""
     try:
         return __import__(name)
@@ -602,7 +612,7 @@ def _check_dep(name, pip_name=None):
         return None
 
 
-def _run_git(root, *args):
+def _run_git(root: Path, *args: str) -> str:
     """Run a git command and return stdout."""
     try:
         r = subprocess.run(["git"] + list(args), capture_output=True, text=True,
@@ -612,7 +622,9 @@ def _run_git(root, *args):
         return ""
 
 
-def _run_git_full(root, *args, timeout=30, check=False):
+def _run_git_full(
+    root: Path, *args: str, timeout: int = 30, check: bool = False,
+) -> "subprocess.CompletedProcess[str]":
     """Run a git command and return the full CompletedProcess (stdout +
     stderr + returncode). Use this when callers need to branch on the
     returncode (e.g. ls-files --error-unmatch returns 0/1, stash returns
@@ -656,7 +668,7 @@ def _run_git_full(root, *args, timeout=30, check=False):
 GIT_NUMSTAT_FORMAT = "COMMIT %H %ae %aI %s"
 
 
-def _fetch_numstat_log(root, since_weeks, paths=("*.py",)):
+def _fetch_numstat_log(root: Path, since_weeks: int, paths: tuple[str, ...] = ("*.py",)) -> str:
     """Run `git log --numstat --format=COMMIT %H %ae %aI %s --since=N weeks ago`
     on the given path globs. Returns the raw stdout. Centralizing the call
     so the format string is defined exactly once — every caller used to
@@ -667,7 +679,7 @@ def _fetch_numstat_log(root, since_weeks, paths=("*.py",)):
     )
 
 
-def _iter_numstat_commits(raw_log):
+def _iter_numstat_commits(raw_log: str) -> Iterator[dict[str, Any]]:
     """Yield structured commit records from `git log --numstat
     --format=COMMIT %H %ae %aI %s` output. Each record is:
 
@@ -711,7 +723,7 @@ def _iter_numstat_commits(raw_log):
         yield cur
 
 
-def find_repo_root():
+def find_repo_root() -> Path:
     """Walk up to find .git directory. Also check script's own location."""
     # First try CWD
     p = Path.cwd()
@@ -728,7 +740,7 @@ def find_repo_root():
     return Path.cwd()
 
 
-def _read_pyproject_pytest_options(root):
+def _read_pyproject_pytest_options(root: Path) -> dict[str, Any]:
     """Return [tool.pytest.ini_options] dict from pyproject.toml, or {}.
 
     Stdlib only — uses tomllib on Python 3.11+, falls back silently otherwise.
@@ -749,12 +761,12 @@ def _read_pyproject_pytest_options(root):
     return data.get("tool", {}).get("pytest", {}).get("ini_options", {})
 
 
-def _read_pyproject_norecursedirs(root):
+def _read_pyproject_norecursedirs(root: Path) -> list[str]:
     """Return the list of dirs from [tool.pytest.ini_options] norecursedirs."""
     return list(_read_pyproject_pytest_options(root).get("norecursedirs", []))
 
 
-def _read_pyproject_testpaths(root):
+def _read_pyproject_testpaths(root: Path) -> list[str]:
     """Return the list of dirs from [tool.pytest.ini_options] testpaths.
 
     When set, pytest only collects from these paths. Cousin pc1 cycle 2 found
@@ -765,7 +777,7 @@ def _read_pyproject_testpaths(root):
     return list(_read_pyproject_pytest_options(root).get("testpaths", []))
 
 
-def find_tests(root):
+def find_tests(root: Path) -> list[Path]:
     """Find all test files in the repo.
 
     Excludes benchmarks by default. Mutation testing measures correctness,
@@ -778,7 +790,7 @@ def find_tests(root):
 
     Override with FORGE_INCLUDE_BENCHMARKS=1 if you really want them.
     """
-    tests = []
+    tests: list[Path] = []
     # If pyproject.toml's [tool.pytest.ini_options] sets testpaths, scope our
     # globs to those dirs only. Otherwise scan the whole repo.
     testpaths = _read_pyproject_testpaths(root)
@@ -833,7 +845,7 @@ def find_tests(root):
     return sorted(deduped)
 
 
-def run_tests(root, verbose=False):
+def run_tests(root: Path, verbose: bool = False) -> dict[str, Any]:
     """Run pytest and capture structured results."""
     cfg = _load_forge_config(root)
     test_files = find_tests(root)
@@ -933,7 +945,7 @@ def run_tests(root, verbose=False):
     }
 
 
-def _get_test_filter():
+def _get_test_filter() -> str | None:
     """Return the FORGE_TEST_FILTER env var as a pytest -k expression, or
     None. All sub-commands that invoke pytest should honor this so a noisy
     target repo (with unrelated pre-existing failures) can be narrowed to
@@ -942,14 +954,14 @@ def _get_test_filter():
     return f or None
 
 
-def _combine_k_filter(test_filter, extra_filter):
+def _combine_k_filter(test_filter: str | None, extra_filter: str | None) -> str | None:
     """Combine two pytest -k expressions with logical AND. Either may be None."""
     if test_filter and extra_filter:
         return f"({test_filter}) and ({extra_filter})"
     return test_filter or extra_filter
 
 
-def _parse_pytest_per_test_status(output):
+def _parse_pytest_per_test_status(output: str) -> dict[str, set[str]]:
     """Parse pytest -v output to extract per-test status by name.
 
     Returns dict[status -> set[test_id]] for these statuses:
@@ -966,7 +978,7 @@ def _parse_pytest_per_test_status(output):
     counts. Otherwise a swap (test_a passed→fails AND test_b fails→passes)
     nets to delta=0 and the user sees "PASS" while a real regression hides.
     """
-    by_status = {
+    by_status: dict[str, set[str]] = {
         "PASSED": set(), "FAILED": set(), "SKIPPED": set(),
         "XFAIL": set(), "XPASS": set(), "ERROR": set(),
     }
@@ -987,7 +999,7 @@ def _parse_pytest_per_test_status(output):
     return by_status
 
 
-def _parse_pytest_failures(output):
+def _parse_pytest_failures(output: str) -> list[dict[str, str]]:
     """Extract unique (test, status, msg) entries from pytest output.
 
     Matches only the "short test summary" format:
@@ -1017,7 +1029,7 @@ def _parse_pytest_failures(output):
     return details
 
 
-def load_json(path):
+def load_json(path: str) -> Any:
     """Load JSON file or return None."""
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -1026,7 +1038,7 @@ def load_json(path):
         return None
 
 
-def save_json(path, data):
+def save_json(path: str | Path, data: Any) -> None:
     """Save JSON file atomically.
 
     Cycle 4 P8 fix: pre-P8 we did `open(path, "w") + json.dump` which is
@@ -1075,7 +1087,7 @@ def save_json(path, data):
                 pass
 
 
-def print_report(results, baseline=None):
+def print_report(results: dict[str, Any], baseline: dict[str, Any] | None = None) -> None:
     """Print formatted test report."""
     total = results["total"]
     passed = results["passed"]
@@ -1177,7 +1189,7 @@ def print_report(results, baseline=None):
     print(f"{bar}\n")
 
 
-def init_repo(root):
+def init_repo(root: Path) -> None:
     """Initialize BUGS.md and .forge/ in a repo."""
     forge_dir = root / FORGE_DIR
     forge_dir.mkdir(exist_ok=True)
@@ -1218,7 +1230,7 @@ def init_repo(root):
     print(f"  Forge initialized in {root.name}")
 
 
-def add_bug(root, description):
+def add_bug(root: Path, description: str) -> str:
     """Add a new bug to BUGS.md."""
     bugs_path = root / BUGS_FILE
     if not bugs_path.exists():
@@ -1247,7 +1259,7 @@ def add_bug(root, description):
     return bug_id
 
 
-def close_bug(root, bug_id):
+def close_bug(root: Path, bug_id: str) -> None:
     """Mark a bug as FIXED in BUGS.md."""
     bugs_path = root / BUGS_FILE
     if not bugs_path.exists():
@@ -1273,7 +1285,7 @@ def close_bug(root, bug_id):
         print(f"  {bug_id} marked FIXED")
 
 
-def log_run(root, results):
+def log_run(root: Path, results: dict[str, Any]) -> None:
     """Append one JSONL entry to the forge log under fcntl.LOCK_EX (POSIX).
 
     Cycle 4 P8 fix: pre-P8 this was a bare `open(..., "a") + write` with
@@ -1316,7 +1328,7 @@ def log_run(root, results):
 
 
 # === FLAKY TEST DETECTION ===
-def detect_flaky(root, runs=None):
+def detect_flaky(root: Path, runs: int | None = None) -> None:
     """Run tests N times, find tests that flip between pass/fail.
     Flaky tests are the #1 trust killer in CI — Luo et al. 2014."""
     cfg = _load_forge_config(root)
@@ -1376,7 +1388,7 @@ def detect_flaky(root, runs=None):
 
 
 # === FAILURE HEAT MAP (Pareto) ===
-def show_heatmap(root):
+def show_heatmap(root: Path) -> None:
     """Analyze forge log to find which tests fail most often.
     Pareto principle: 20% of tests cause 80% of failures — Kaner 2003."""
     log_path = root / FORGE_LOG
@@ -1386,7 +1398,7 @@ def show_heatmap(root):
 
     # Also check all saved reports for detail
     report_dir = root / FORGE_DIR
-    failure_counts = Counter()
+    failure_counts: Counter[str] = Counter()
     total_runs = 0
 
     # Parse log for run counts
@@ -1442,7 +1454,7 @@ def show_heatmap(root):
 
 
 # === GIT BISECT AUTOMATION ===
-def bisect_test(root, test_name):
+def bisect_test(root: Path, test_name: str) -> None:
     """Auto git-bisect to find which commit broke a specific test.
     Zeller 1999 — Delta Debugging + binary search on commits."""
     cfg = _load_forge_config(root)
@@ -1487,7 +1499,7 @@ def bisect_test(root, test_name):
     stash_r = _run_git_full(root, "stash", "--include-untracked", "--quiet")
     did_stash = stash_r.returncode == 0 and "No local changes" not in (stash_r.stdout + stash_r.stderr)
 
-    def _restore_survivors():
+    def _restore_survivors() -> None:
         for rel, data in survivors.items():
             p = root / rel
             if not p.exists():
@@ -1564,7 +1576,7 @@ def bisect_test(root, test_name):
 
 
 # === TEST IMPACT ANALYSIS (--fast) ===
-def get_changed_files(root):
+def get_changed_files(root: Path) -> set[str]:
     """Get Python files changed since last commit."""
     # All three are git plumbing calls; route through _run_git_full so a
     # frozen git (e.g. lock contention with another forge instance) can't
@@ -1582,7 +1594,7 @@ def get_changed_files(root):
     return files
 
 
-def find_impacted_tests(root, changed_files):
+def find_impacted_tests(root: Path, changed_files: set[str]) -> list[Path]:
     """Find tests that import or reference changed modules.
     Inspired by pytest-testmon (Puha 2015) — dependency graph for test selection."""
     changed_modules = set()
@@ -1602,7 +1614,7 @@ def find_impacted_tests(root, changed_files):
     return impacted
 
 
-def run_fast(root, verbose=False):
+def run_fast(root: Path, verbose: bool = False) -> None:
     """Run only tests impacted by recent changes."""
     cfg = _load_forge_config(root)
     impacted_timeout = cfg["impacted_tests_timeout_seconds"]
@@ -1684,7 +1696,7 @@ def run_fast(root, verbose=False):
 
 
 # === SNAPSHOT / GOLDEN FILE TESTING ===
-def snapshot_capture(root, cmd_str):
+def snapshot_capture(root: Path, cmd_str: str) -> None:
     """Capture command output as a golden file for regression detection.
     Golden master testing — Feathers 2004, Working Effectively with Legacy Code."""
     cfg = _load_forge_config(root)
@@ -1717,7 +1729,7 @@ def snapshot_capture(root, cmd_str):
     print(f"  Saved: {snap_path.name} ({output.count(chr(10))} lines)")
 
 
-def snapshot_check(root):
+def snapshot_check(root: Path) -> None:
     """Compare all golden files against current output."""
     cfg = _load_forge_config(root)
     cmd_timeout = cfg["snapshot_command_timeout_seconds"]
@@ -1787,7 +1799,7 @@ def snapshot_check(root):
 
 
 # === AXE 5: DEFECT PREDICTION (Nagappan & Ball 2005, Hassan 2009) ===
-def predict_defects(root, weeks=None):
+def predict_defects(root: Path, weeks: int | None = None) -> None:
     """Predict which files are most likely to have bugs based on git history.
     Uses: relative churn, change frequency, change bursts, author count,
     bugfix frequency, LOC, recency. Nagappan & Ball ICSE 2005."""
@@ -1917,7 +1929,7 @@ FLAKY_PATTERNS = {
 }
 
 
-def _classify_flaky_test(test_name, root):
+def _classify_flaky_test(test_name: str, root: Path) -> list[tuple[str, str]]:
     """Scan test source for flaky pattern indicators via AST + text search."""
     # Find the test file
     for test_file in find_tests(root):
@@ -1940,7 +1952,7 @@ def _classify_flaky_test(test_name, root):
     return []
 
 
-def _print_flaky_classification(flaky_tests, root):
+def _print_flaky_classification(flaky_tests: list[dict[str, Any]], root: Path) -> None:
     """Print classification for detected flaky tests."""
     if not flaky_tests:
         return
@@ -1959,7 +1971,7 @@ def _print_flaky_classification(flaky_tests, root):
 
 
 # === AXE 1: DELTA DEBUGGING / ddmin (Zeller & Hildebrandt 2002) ===
-def _split_input(content, ext):
+def _split_input(content: str, ext: str) -> tuple[list[Any], str]:
     """Split input into chunks based on file format."""
     if ext == ".json":
         data = json.loads(content)
@@ -1976,7 +1988,7 @@ def _split_input(content, ext):
     return content.strip().split("\n"), "lines"
 
 
-def _rebuild_input(chunks, fmt, original_content=""):
+def _rebuild_input(chunks: list[Any], fmt: str, original_content: str = "") -> str:
     """Rebuild input from chunks based on format."""
     if fmt == "json_list":
         return json.dumps(chunks, indent=2, ensure_ascii=False)
@@ -1988,7 +2000,10 @@ def _rebuild_input(chunks, fmt, original_content=""):
     return "\n".join(chunks)
 
 
-def _test_with_input(root, test_name, input_content, input_ext, timeout=None):
+def _test_with_input(
+    root: Path, test_name: str, input_content: str, input_ext: str,
+    timeout: int | None = None,
+) -> bool:
     """Write input to temp file and run test. Returns True if test FAILS."""
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=input_ext, delete=False,
                                       encoding="utf-8", dir=str(root / FORGE_DIR))
@@ -2016,7 +2031,7 @@ def _test_with_input(root, test_name, input_content, input_ext, timeout=None):
             pass
 
 
-def minimize_input(root, test_name, input_file):
+def minimize_input(root: Path, test_name: str, input_file: str) -> None:
     """Delta debugging: find minimal input that still fails the test.
     Zeller & Hildebrandt 2002, IEEE TSE Vol.28 No.2."""
     cfg = _load_forge_config(root)
@@ -2169,7 +2184,7 @@ _PATH_LIKE_ARG_NAMES = {
 }
 
 
-def _is_destructive_function(node):
+def _is_destructive_function(node: ast.FunctionDef) -> tuple[bool, str]:
     """Return (is_destructive, reason) for an ast.FunctionDef node.
 
     Heuristics (any-of):
@@ -2232,7 +2247,7 @@ def _is_destructive_function(node):
     return False, ""
 
 
-def gen_props(root, module_path, include_destructive=False):
+def gen_props(root: Path, module_path: str, include_destructive: bool = False) -> None:
     """Analyze a Python module and generate Hypothesis property test skeletons.
     Detects: round-trip pairs, idempotent ops, sort/filter invariants.
 
@@ -2324,7 +2339,7 @@ def gen_props(root, module_path, include_destructive=False):
                 "dict": "st.dictionaries(st.text(max_size=10), st.integers(), max_size=10)",
                 "bytes": "st.binary(max_size=100)"}
 
-    def strategy_for(arg):
+    def strategy_for(arg: dict[str, Any]) -> str:
         if arg["type"] in TYPE_MAP:
             return TYPE_MAP[arg["type"]]
         return "st.text(max_size=50)"
@@ -2533,7 +2548,7 @@ MUTATION_OPS = [
 ]
 
 
-def _generate_mutants(source_path):
+def _generate_mutants(source_path: Path) -> Iterator[tuple[int, str, str, str, str]]:
     """Generate mutants for a Python source file. Yields (line_no, op_name, original, mutated, full_source)."""
     source = source_path.read_text(encoding="utf-8", errors="replace")
     lines = source.split("\n")
@@ -2553,7 +2568,10 @@ def _generate_mutants(source_path):
                     yield (i + 1, op_name, line.strip(), mutated_line.strip(), mutated_source)
 
 
-def _try_one_mutant(src, original, mut_source, test_paths, root, timeout):
+def _try_one_mutant(
+    src: Path, original: str, mut_source: str,
+    test_paths: list[str], root: Path, timeout: int,
+) -> dict[str, str]:
     """Apply one mutant to `src`, run the test suite, restore original.
     Extracted from run_mutation's inner loop so the write-inside-try
     invariant can be verified by a real behavior test (cycle 4 P3)
@@ -2592,7 +2610,9 @@ def _try_one_mutant(src, original, mut_source, test_paths, root, timeout):
         src.write_text(original, encoding="utf-8")
 
 
-def run_mutation(root, target_file=None, cfg=None):
+def run_mutation(
+    root: Path, target_file: str | None = None, cfg: dict[str, Any] | None = None,
+) -> float | None:
     """Pure-Python mutation testing. No external deps. Offutt 1996: 5 operators suffice.
     Mutation score = killed / total. Target: >80%."""
     # Find target files
@@ -2610,12 +2630,12 @@ def run_mutation(root, target_file=None, cfg=None):
 
     if not targets:
         print("  No Python files to mutate.")
-        return
+        return None
 
     test_files = find_tests(root)
     if not test_files:
         print("  No tests found. Can't run mutation testing.")
-        return
+        return None
 
     test_paths = [str(f) for f in test_files]
     if cfg is None:
@@ -2730,7 +2750,7 @@ def run_mutation(root, target_file=None, cfg=None):
 
 
 # === AXE 4: SPECTRUM-BASED FAULT LOCALIZATION / Ochiai (Abreu et al. 2007) ===
-def fault_locate(root):
+def fault_locate(root: Path) -> None:
     """Locate suspicious lines using Ochiai SBFL formula.
     suspiciousness(s) = failed(s) / sqrt(total_failed * (failed(s) + passed(s)))
     Uses coverage.data.CoverageData for per-test context (10x faster than per-test runs)."""
@@ -2828,7 +2848,7 @@ def fault_locate(root):
         return
 
     # Normalize test IDs: coverage contexts use "path::test|run" format
-    def _match_test(ctx_name, test_set):
+    def _match_test(ctx_name: str, test_set: set[str]) -> bool:
         """Check if a coverage context matches any test in the set."""
         # Strip "|run" suffix from coverage context
         clean = ctx_name.split("|")[0].strip()
@@ -2913,7 +2933,7 @@ def fault_locate(root):
 
 
 # === CARMACK: ENHANCED DEFECT PREDICTION (Kalman + Wavelet + KM + Modularity) ===
-def predict_carmack(root, weeks=None):
+def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]] | None:
     """Cross-domain defect prediction. Replaces fixed weights with:
     - Kalman filter (adaptive risk from bugfix signal)
     - Haar wavelet (multi-scale churn decomposition)
@@ -2925,7 +2945,7 @@ def predict_carmack(root, weeks=None):
     tracked = _run_git(root, "ls-files", "*.py")
     if not tracked:
         print("  No tracked .py files found.")
-        return
+        return None
     files = [f for f in tracked.split("\n") if f.strip()]
 
     raw_log = _fetch_numstat_log(root, weeks)
@@ -2962,7 +2982,7 @@ def predict_carmack(root, weeks=None):
     coupling = _modularity_contribution(graph)
 
     # Build a baseline date for KM censoring: oldest commit in window.
-    all_dates = []
+    all_dates: list[str] = []
     for s in file_stats.values():
         all_dates.extend(s["dates"])
     try:
@@ -3059,13 +3079,13 @@ def predict_carmack(root, weeks=None):
 
     if not results:
         print(f"  No commits in the last {weeks} weeks.")
-        return
+        return None
 
     # Min-max normalize each signal across the active files, then compose.
     # This way each axis contributes its full weight instead of being clipped
     # by an arbitrary cap (different signals live on different scales now:
     # Kalman ~ weekly bug count, wavelet ~ multi-band churn energy, KM ~ [0,1]).
-    def _norm(values):
+    def _norm(values: list[float]) -> list[float]:
         lo = min(values)
         hi = max(values)
         rng = hi - lo
@@ -3122,7 +3142,7 @@ def predict_carmack(root, weeks=None):
 
 
 # === CARMACK: UNIFIED ANOMALY DETECTION (z-score outliers) ===
-def anomaly_detect(root, weeks=None):
+def anomaly_detect(root: Path, weeks: int | None = None) -> list[dict[str, Any]] | None:
     """All axes are anomaly detection in disguise.
     Z-score across git metrics — flag files with z > 2.0 on 2+ metrics."""
     cfg = _load_forge_config(root)
@@ -3131,7 +3151,7 @@ def anomaly_detect(root, weeks=None):
     tracked = _run_git(root, "ls-files", "*.py")
     if not tracked:
         print("  No tracked .py files found.")
-        return
+        return None
     files = [f for f in tracked.split("\n") if f.strip()]
 
     raw_log = _fetch_numstat_log(root, weeks)
@@ -3170,7 +3190,7 @@ def anomaly_detect(root, weeks=None):
 
     if len(metrics_list) < 3:
         print("  Not enough files with activity for anomaly detection.")
-        return
+        return None
 
     keys = ["churn", "freq", "authors", "bugfix_ratio", "loc"]
     means = {}
@@ -3217,14 +3237,14 @@ def anomaly_detect(root, weeks=None):
 
 
 # === CARMACK: FLAKY DTW — Temporal pattern matching ===
-def flaky_dtw(root, runs=None):
+def flaky_dtw(root: Path, runs: int | None = None) -> dict[str, list[int]] | None:
     """Enhanced flaky detection with DTW temporal pattern matching.
     Tests with similar pass/fail sequences = likely same root cause."""
     cfg = _load_forge_config(root)
     if runs is None:
         runs = cfg["flaky_dtw_runs"]
     dtw_threshold = cfg["carmack_dtw_threshold"]
-    test_sequences = {}
+    test_sequences: dict[str, list[int]] = {}
 
     for run_num in range(runs):
         print(f"  Run {run_num + 1}/{runs}...", end=" ", flush=True)
@@ -3244,7 +3264,7 @@ def flaky_dtw(root, runs=None):
 
     if not flaky_tests:
         print("  No flaky tests detected across runs.")
-        return
+        return None
 
     # DTW clustering
     test_names = list(flaky_tests.keys())
@@ -3281,7 +3301,7 @@ def flaky_dtw(root, runs=None):
 
 
 # === --WATCH HELPERS — extracted for testability (cycle 4 P3) ===
-def _watch_iteration(root, last_hash):
+def _watch_iteration(root: Path, last_hash: str) -> str:
     """One iteration of the --watch loop, extracted so it's testable.
 
     Hashes every .py file in the repo (skipping .forge / __pycache__).
@@ -3317,7 +3337,7 @@ def _watch_iteration(root, last_hash):
 
 
 # === FULL CYCLE — The complete pipeline (metaprompt synthesis) ===
-def full_cycle(root):
+def full_cycle(root: Path) -> None:
     """Run the full forge pipeline: predict -> mutate -> gen-props -> test -> flaky -> locate.
     Each step feeds the next. Stops early if nothing to do."""
     cfg = _load_forge_config(root)
@@ -3524,7 +3544,7 @@ _VALUE_DESCRIPTION = {
 }
 
 
-def _expand_equals_args(args):
+def _expand_equals_args(args: list[str]) -> list[str]:
     """Split `--key=value` into `--key`, `value` so the rest of the
     validator + dispatch can treat both `--weeks 8` and `--weeks=8`
     identically. Standard argparse convention. Args without `=` or
@@ -3543,7 +3563,7 @@ def _expand_equals_args(args):
     return out
 
 
-def _validate_args(args):
+def _validate_args(args: list[str]) -> None:
     """Reject unknown flags and obviously-wrong value types BEFORE the
     if/elif dispatch in main(). This kills the silent typo bug (`forge
     --frobulate` used to exit 0 with no output), the silent type bug
@@ -3599,7 +3619,7 @@ def _validate_args(args):
         i += 1
 
 
-def main():
+def main() -> None:
     root = find_repo_root()
     args = sys.argv[1:]
 
