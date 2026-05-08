@@ -910,14 +910,21 @@ def find_tests(root: Path) -> list[Path]:
             # Convert "testing/example_scripts" → "/testing/example_scripts/"
             # so we match the directory inside the path, not a substring of a
             # file name (avoids "examples_test.py" being excluded by "examples").
+            # Cycle 4 J-2: use forward slash uniformly. On Windows, Path.glob
+            # can return paths whose str() mixes "/" and "\" depending on how
+            # the path was constructed; comparing against `as_posix()` (always
+            # forward slash) gives a stable contract. Pre-J-2: excludes used
+            # os.sep but compare was against str(t), which could be either —
+            # 4 of the 5 tests-side fixes in J-1 fixed the *test* assertions
+            # but the actual exclusion bug surfaced here on Windows CI.
             seg = nr.strip("/").strip(os.sep)
-            excludes.append(f"{os.sep}{seg}{os.sep}")
+            excludes.append(f"/{seg}/")
     if not os.environ.get("FORGE_INCLUDE_BENCHMARKS"):
         # Match /bench/ or /benchmarks/ anywhere in the path. Conservative —
         # only directory names that match exactly, not any file containing
         # "bench" in its name.
-        excludes += [f"{os.sep}bench{os.sep}", f"{os.sep}benchmarks{os.sep}"]
-    tests = [t for t in tests if not any(x in str(t) for x in excludes)]
+        excludes += ["/bench/", "/benchmarks/"]
+    tests = [t for t in tests if not any(x in t.as_posix() for x in excludes)]
     # Dedupe by resolved absolute path so a symlinked test isn't counted
     # twice (pathlib's Path equality is path-string based, not inode-based;
     # a symlink and its target are two different Path objects).
