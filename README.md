@@ -1,12 +1,47 @@
 # forge
 
-Pytest regression shield with predictive analytics for Python repos. Single-file, **stdlib-only** runtime (pytest is the only required dep at run time).
+[![Tests](https://img.shields.io/badge/tests-205%20passed-brightgreen)](https://github.com/sky1241/forge)
+[![mypy strict](https://img.shields.io/badge/mypy-strict-blue)](https://github.com/sky1241/forge)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Pytest regression shield with predictive analytics for Python repos. Single-file core, stdlib-only runtime (pytest is the only required dep — bring your own).
 
 ```bash
 pip install forge-shield
-forge --init    # baseline current test suite
+forge --init    # scaffold .forge/ and BUGS.md
+forge --baseline # snapshot current test suite
 forge           # detect regressions vs baseline
 forge --carmack # rank files by predicted defect risk
+```
+
+## What's new (cycle 4)
+
+- **`mypy --strict`** passes the entire codebase (`tests/test_typing.py` enforces).
+- **`--mutate`** now uses [libcst](https://github.com/Instagram/LibCST) (AST-aware) — 0 invalid mutants by construction. The previous regex backend produced 23.4% syntax-error noise on real repos (filelock, attrs, mistune); see [`docs/D3B_RUNTIME_VALIDATION.md`](docs/D3B_RUNTIME_VALIDATION.md).
+- **Granular install extras**: `[mutate]` / `[locate]` / `[fuzz]` / `[all]` — pay only for the subcommands you use.
+- **`.forge/config.json`** consumes 21 user-tunable knobs (mutation threshold, ochiai top-N, kalman Q/R, KM horizon, hamming severity, ochiai cutoffs, carmack composite weights, full-cycle small-file LOC, all subprocess timeouts).
+- **CLI validator** rejects unknown flags with a `did you mean` hint via `difflib`.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full picture.
+
+## Installation
+
+### Default (zero deps beyond stdlib + your pytest)
+
+```bash
+pip install forge-shield
+```
+
+Ships with: `--predict`, `--carmack`, `--baseline`, `--diff`, `--watch`, `--bisect`, `--flaky`, `--snapshot`, `--add`, `--close`, `--fast`, `--heatmap`, `--init`.
+
+### With optional features
+
+```bash
+pip install 'forge-shield[mutate]'   # adds --mutate    (libcst-based)
+pip install 'forge-shield[locate]'   # adds --locate    (Ochiai SBFL via coverage)
+pip install 'forge-shield[fuzz]'     # adds --gen-props (Hypothesis)
+pip install 'forge-shield[all]'      # everything above
 ```
 
 ## What it does
@@ -15,9 +50,19 @@ forge --carmack # rank files by predicted defect risk
 - **Flaky test detection** — re-runs failures, classifies flaky vs deterministic.
 - **Defect-prone file ranking** (`--carmack`) — combines git churn, import coupling and test-failure history into a per-file risk score.
 - **Test generation** (`--gen-props`) — emits Hypothesis property tests for pure functions, with a destructive-side-effect AST guard so it never runs `gen_props` on code that writes files or shells out.
-- **Mutation testing** (`--mutate`) — pure-Python AST mutator, no `mutmut` install needed.
+- **Mutation testing** (`--mutate`) — libcst (AST-aware) mutator, Offutt 1996 operators (AOR, ROR, LCR, UOI, SDL).
 - **Fault localization** (`--locate`) — Ochiai SBFL formula over `coverage.py` data.
 - **Delta debugging** (`--minimize`) — ddmin (Zeller 2002) to shrink failing inputs.
+
+## Optional features
+
+| Feature | Extra | Backend |
+|---|---|---|
+| `--mutate` (Offutt 1996 mutation testing) | `[mutate]` | [libcst](https://github.com/Instagram/LibCST) AST-aware |
+| `--locate` (Abreu 2007 Ochiai SBFL) | `[locate]` | [coverage.py](https://coverage.readthedocs.io/) + pytest-cov |
+| `--gen-props` (Hypothesis property tests) | `[fuzz]` | [hypothesis](https://hypothesis.readthedocs.io/) |
+
+Forge prints a clean install hint (no Python traceback) if you invoke a subcommand without its extra installed — e.g. `forge --mutate` without `[mutate]` says `pip install 'forge-shield[mutate]'` and exits.
 
 ## What's actually inside
 
@@ -44,12 +89,10 @@ Validation tests pin known results: Karate Club graph Q ∈ [0.38, 0.45] (Zachar
 
 ## Requirements
 
-- Python ≥ 3.10
-- pytest (required at runtime, not bundled)
-- `coverage`, `hypothesis`, `mutmut` only needed for the corresponding subcommands
-
-Cross-platform: macOS / Linux / Windows. All subprocess calls go through `sys.executable -m pytest` and use UTF-8 with `errors=replace`.
+- Python ≥ 3.11 (uses stdlib `tomllib`)
+- pytest (your project's test runner — not bundled with forge)
+- Cross-platform: macOS / Linux / Windows. Subprocess calls go through `sys.executable -m pytest` with UTF-8 `errors=replace`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Changelog: [CHANGELOG.md](CHANGELOG.md).
