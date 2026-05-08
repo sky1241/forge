@@ -1620,6 +1620,29 @@ def run_fast(root, verbose=False):
     passed = int(summary.group(1)) if summary else 0
     failed = int(summary_f.group(1)) if summary_f else 0
 
+    # Surface pytest collection / runner errors instead of silently
+    # reporting `0 tests` (cycle 4 P9 fix). Pytest exit codes:
+    #   0 = all pass, 1 = some fail, 2 = collection error / cli misuse,
+    #   3 = internal error, 4 = usage error, 5 = no tests collected.
+    # rc == 0 / 1 with no `passed`/`failed` parsed means our regex
+    # missed the summary line — that itself is a runner anomaly worth
+    # surfacing rather than printing "0 tests" as if everything was OK.
+    if result.returncode not in (0, 1) or (passed == 0 and failed == 0):
+        bar = "=" * 50
+        print(f"\n{bar}")
+        print(f"  PYTEST RUNNER ERROR (during --fast)")
+        print(f"{bar}")
+        print(f"  exit code: {result.returncode}")
+        # Last 15 lines of combined output — usually contains the cause
+        tail = "\n".join(output.splitlines()[-15:])
+        for line in tail.splitlines():
+            print(f"    {line}")
+        print(f"  Hint: a test file in --fast's impacted set crashed at")
+        print(f"  collection (missing dep, broken import, mypy_test_cases/...).")
+        print(f"  Run `forge` (full suite) to confirm the same issue happens")
+        print(f"  there, or fix the broken collector and re-run --fast.\n")
+        return
+
     bar = "=" * 50
     print(f"\n{bar}")
     print(f"  FAST MODE — {passed + failed} tests in {duration:.1f}s")
@@ -3329,16 +3352,31 @@ def full_cycle(root):
     print(f"  [8/8] CARMACK MOVES ACTIVE: Kalman, Wavelet, Kaplan-Meier, Newman, Hamming, DTW")
 
     # --- SUMMARY ---
+    # The summary uses `results` from STEP 4's run_tests above (line ~3302).
+    # Cycle 4 P9 fix: previously when run_tests caught a collection error
+    # (missing dep, broken conftest), `total` could end up = errors with
+    # 0P/0F, which made the summary read "Tests: 1 (0P/0F/1E)" and looked
+    # like the suite was 1 test long. Now we surface the runner-error case
+    # explicitly so the user knows pytest never actually ran the tests.
     print(f"\n{bar}")
     print(f"  FULL CYCLE COMPLETE")
     print(f"{bar}")
-    print(f"  Tests:   {results['total']} ({results['passed']}P / {results['failed']}F / {results['errors']}E)")
-    if py_sources:
-        print(f"  Changed: {', '.join(py_sources[:5])}")
-    if not has_failures:
-        print(f"  Status:  ALL CLEAR")
+    real_test_count = results["passed"] + results["failed"]
+    if real_test_count == 0 and results["errors"] > 0:
+        print(f"  Tests:   COLLECTION ERROR — pytest could not run "
+              f"({results['errors']} error{'s' if results['errors'] != 1 else ''})")
+        print(f"  Status:  pytest never reached your test bodies.")
+        print(f"           Check `forge` output for `PYTEST RUNNER ERROR`")
+        print(f"           or run pytest directly to see the import / collection failure.")
     else:
-        print(f"  Status:  {results['failed'] + results['errors']} issue(s) found — check LOCATE output above")
+        print(f"  Tests:   {results['total']} ({results['passed']}P / "
+              f"{results['failed']}F / {results['errors']}E)")
+        if py_sources:
+            print(f"  Changed: {', '.join(py_sources[:5])}")
+        if not has_failures:
+            print(f"  Status:  ALL CLEAR")
+        else:
+            print(f"  Status:  {results['failed'] + results['errors']} issue(s) found — check LOCATE output above")
     print(f"{bar}\n")
 
 

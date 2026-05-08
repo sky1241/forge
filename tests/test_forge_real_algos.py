@@ -2304,6 +2304,140 @@ class TestCycle3CliValidation:
         assert "--carmack" in out
 
 
+class TestCycle4P9RuntimeBugs:
+    """Cycle 4 P9: cousin pc1 audit cycle 3 (agent 4 runtime) flagged
+    two silent-fail patterns that cycle 3 didn't address.
+
+      Bug B — full_cycle summary "Tests: 1 (0P/0F/1E)" when collection
+      errors happened (loguru on real loguru run). The number is
+      technically what run_tests returned, but it reads as if the
+      whole suite was 1 test.
+
+      Bug C — run_fast swallowed pytest collection / runner errors:
+      if pytest exited 2 (collection failure) the regex `\\d+ passed`
+      didn't match, passed/failed both stayed 0, and the function
+      printed "FAST MODE — 0 tests" with no warning that pytest had
+      actually failed to run the tests.
+
+    Both surfaces now mirror the pattern run_tests uses since cycle 2
+    (PYTEST RUNNER ERROR + tail + actionable hint).
+    """
+
+    def test_run_fast_surfaces_pytest_collection_error(self, tmp_path, monkeypatch, capsys):
+        """When pytest exits with rc=2 and stderr contains a collection
+        traceback, run_fast must print PYTEST RUNNER ERROR with a tail
+        of the output, NOT 'FAST MODE — 0 tests'."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True,
+                       capture_output=True)
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_x.py").write_text("def test_a(): assert True\n")
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "add", "-A"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-m", "init", "-q"], cwd=str(repo),
+                       check=True, capture_output=True)
+        # Modify the test file itself — test_files always include changed
+        # test_*.py files (so run_fast doesn't bail at "No impacted").
+        (repo / "tests" / "test_x.py").write_text(
+            "def test_a(): assert True\ndef test_b(): assert True\n"
+        )
+
+        # Stub subprocess.run inside forge to simulate a collection failure
+        original_run = subprocess.run
+
+        def fake_run(cmd, *a, **kw):
+            # Only intercept the pytest invocation
+            if cmd and cmd[0] == sys.executable and "pytest" in cmd[1:3]:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=2,
+                    stdout="ImportError while loading conftest...\n"
+                           "ModuleNotFoundError: No module named 'freezegun'\n",
+                    stderr="",
+                )
+            return original_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(forge.subprocess, "run", fake_run)
+        forge.run_fast(repo)
+        out = capsys.readouterr().out
+        assert "PYTEST RUNNER ERROR" in out, (
+            f"run_fast must surface pytest collection errors instead of "
+            f"reporting 0 tests:\n{out}"
+        )
+        assert "exit code: 2" in out
+        # Must NOT print the misleading "FAST MODE" success header
+        assert "FAST MODE" not in out
+
+    def test_full_cycle_summary_shows_collection_error_clearly(self, tmp_path,
+                                                                monkeypatch, capsys):
+        """When run_tests inside full_cycle returns 0P/0F/Ne (pure
+        collection errors), the summary must say 'COLLECTION ERROR',
+        not 'Tests: N (0P/0F/NE)' which reads like the suite is N long."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "--allow-empty", "-m", "init", "-q"],
+                       cwd=str(repo), check=True, capture_output=True)
+
+        # Stub all the heavy sub-functions to no-op + force run_tests to
+        # return a "pure collection error" result shape.
+        monkeypatch.setattr(forge, "predict_defects", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "predict_carmack", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "anomaly_detect", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "get_changed_files", lambda *a, **kw: set())
+        monkeypatch.setattr(forge, "run_tests", lambda *a, **kw:
+                            {"total": 1, "passed": 0, "failed": 0, "errors": 1,
+                             "skipped": 0, "details": [], "duration": 0.1,
+                             "passed_tests": [], "failed_tests": [],
+                             "xfailed_tests": [], "xpassed_tests": []})
+        monkeypatch.setattr(forge, "log_run", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "save_json", lambda *a, **kw: None)
+
+        forge.full_cycle(repo)
+        out = capsys.readouterr().out
+        assert "COLLECTION ERROR" in out, (
+            f"full_cycle summary must say COLLECTION ERROR when the test "
+            f"run had only collection errors:\n{out[-500:]}"
+        )
+        assert "Tests:   1 (0P / 0F / 1E)" not in out, (
+            f"the misleading old format must NOT appear in this case:\n{out}"
+        )
+
+    def test_full_cycle_summary_normal_path_unchanged(self, tmp_path, monkeypatch, capsys):
+        """The collection-error branch must NOT trigger when there's at
+        least one real test result (pass or fail). The normal summary
+        format stays."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "--allow-empty", "-m", "init", "-q"],
+                       cwd=str(repo), check=True, capture_output=True)
+
+        monkeypatch.setattr(forge, "predict_defects", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "predict_carmack", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "anomaly_detect", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "get_changed_files", lambda *a, **kw: set())
+        monkeypatch.setattr(forge, "run_tests", lambda *a, **kw:
+                            {"total": 5, "passed": 5, "failed": 0, "errors": 0,
+                             "skipped": 0, "details": [], "duration": 0.3,
+                             "passed_tests": ["t1", "t2", "t3", "t4", "t5"],
+                             "failed_tests": [], "xfailed_tests": [],
+                             "xpassed_tests": []})
+        monkeypatch.setattr(forge, "log_run", lambda *a, **kw: None)
+        monkeypatch.setattr(forge, "save_json", lambda *a, **kw: None)
+
+        forge.full_cycle(repo)
+        out = capsys.readouterr().out
+        assert "ALL CLEAR" in out
+        assert "Tests:   5 (5P / 0F / 0E)" in out
+        assert "COLLECTION ERROR" not in out
+
+
 class TestCycle4P8AtomicWriteAndLock:
     """Cycle 4 P8: cousin pc1 audit flagged save_json + log_run as
     non-atomic / unlocked.
