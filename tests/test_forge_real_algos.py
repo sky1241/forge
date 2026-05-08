@@ -1501,3 +1501,90 @@ class TestCycle3CloseBugAcceptsDigitId:
         forge.close_bug(repo, "bug-001")
         out = capsys.readouterr().out
         assert "BUG-001 marked FIXED" in out
+
+
+# ============================================================================
+# Cycle 3 — chunk 3 — structural dedupes (cousin pc1 audit)
+# ============================================================================
+
+
+class TestCycle3IterNumstatCommits:
+    """Bug: 3 hand-rolled COMMIT-line parsers in --predict, --carmack and
+    the AXE-3 trend pass had silently drifted across cycles. Now there's a
+    single _iter_numstat_commits + _fetch_numstat_log helper so the format
+    string lives in one place (GIT_NUMSTAT_FORMAT) and the parser can't
+    drift."""
+
+    def test_iter_numstat_basic_shape(self):
+        raw = (
+            "COMMIT abc123 alice@x.com 2026-01-01T10:00:00+00:00 fix: bug in foo\n"
+            "10\t2\tsrc/foo.py\n"
+            "0\t5\tsrc/bar.py\n"
+            "\n"
+            "COMMIT def456 bob@x.com 2026-01-02T11:00:00+00:00 add new feature\n"
+            "20\t0\tsrc/feature.py\n"
+        )
+        commits = list(forge._iter_numstat_commits(raw))
+        assert len(commits) == 2
+
+        c1 = commits[0]
+        assert c1["hash"] == "abc123"
+        assert c1["author"] == "alice@x.com"
+        assert c1["date"] == "2026-01-01T10:00:00+00:00"
+        assert c1["msg"] == "fix: bug in foo"
+        assert c1["is_bugfix"] is True
+        assert c1["files"] == [(10, 2, "src/foo.py"), (0, 5, "src/bar.py")]
+
+        c2 = commits[1]
+        assert c2["hash"] == "def456"
+        assert c2["is_bugfix"] is False
+        assert c2["files"] == [(20, 0, "src/feature.py")]
+
+    def test_iter_numstat_binary_files_coerced_to_zero(self):
+        """git uses '-' for added/deleted on binary files. Must not crash
+        with int('-')."""
+        raw = (
+            "COMMIT x author@x.com 2026-01-01T10:00:00+00:00 add image\n"
+            "-\t-\tassets/logo.png\n"
+            "5\t0\tsrc/code.py\n"
+        )
+        commits = list(forge._iter_numstat_commits(raw))
+        assert len(commits) == 1
+        assert commits[0]["files"] == [(0, 0, "assets/logo.png"), (5, 0, "src/code.py")]
+
+    def test_iter_numstat_empty_input(self):
+        assert list(forge._iter_numstat_commits("")) == []
+        assert list(forge._iter_numstat_commits("\n\n\n")) == []
+
+    def test_iter_numstat_malformed_commit_line_skipped(self):
+        """Line starting with COMMIT but missing author/date/msg fields
+        must not produce a half-built record."""
+        raw = (
+            "COMMIT short\n"
+            "10\t0\tx.py\n"
+            "COMMIT abc author@x.com 2026-01-01T00:00:00+00:00 ok msg\n"
+            "5\t1\ty.py\n"
+        )
+        commits = list(forge._iter_numstat_commits(raw))
+        # malformed first commit drops to None → its numstat lines are ignored
+        assert len(commits) == 1
+        assert commits[0]["hash"] == "abc"
+        assert commits[0]["files"] == [(5, 1, "y.py")]
+
+    def test_bugfix_keywords_are_constant(self):
+        """All sites must reference the same BUGFIX_KEYWORDS tuple. Was
+        triplicated as ["fix","bug","patch","repair","crash"] inline."""
+        assert forge.BUGFIX_KEYWORDS == ("fix", "bug", "patch", "repair", "crash")
+        # Sanity: keyword detection works
+        assert any(w in "fix typo" for w in forge.BUGFIX_KEYWORDS)
+        assert any(w in "patch the leak" for w in forge.BUGFIX_KEYWORDS)
+        assert not any(w in "add feature" for w in forge.BUGFIX_KEYWORDS)
+
+    def test_git_numstat_format_constant_used_by_fetch(self):
+        """GIT_NUMSTAT_FORMAT must be the format the parser expects.
+        Bind them so a future drift gets caught."""
+        assert "%H" in forge.GIT_NUMSTAT_FORMAT
+        assert "%ae" in forge.GIT_NUMSTAT_FORMAT
+        assert "%aI" in forge.GIT_NUMSTAT_FORMAT
+        assert "%s" in forge.GIT_NUMSTAT_FORMAT
+        assert forge.GIT_NUMSTAT_FORMAT.startswith("COMMIT ")

@@ -72,6 +72,11 @@ CARMACK_KALMAN_Q = 0.05   # Kalman process noise (how fast risk changes)
 CARMACK_KALMAN_R = 0.5    # Kalman measurement noise (how noisy observations are)
 CARMACK_DTW_THRESHOLD = 2.0  # DTW similarity threshold for flaky clustering
 CARMACK_ZSCORE_THRESHOLD = 2.0  # Anomaly detection z-score cutoff
+# Substrings that mark a commit as a bugfix in commit-message scans. Used by
+# --predict, --carmack, and the AXE-3 trend analysis. Lowercased so callers
+# don't need to lowercase per-iteration. Keeping this as the single source of
+# truth: changing it once changes every signal that gates on bugfix-ness.
+BUGFIX_KEYWORDS = ("fix", "bug", "patch", "repair", "crash")
 
 
 # === CARMACK MOVES — Cross-domain algorithms ===
@@ -449,6 +454,64 @@ def _run_git(root, *args):
         return r.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ""
+
+
+GIT_NUMSTAT_FORMAT = "COMMIT %H %ae %aI %s"
+
+
+def _fetch_numstat_log(root, since_weeks, paths=("*.py",)):
+    """Run `git log --numstat --format=COMMIT %H %ae %aI %s --since=N weeks ago`
+    on the given path globs. Returns the raw stdout. Centralizing the call
+    so the format string is defined exactly once — every caller used to
+    repeat it verbatim, which silently drifted in the past."""
+    return _run_git(
+        root, "log", "--numstat", f"--format={GIT_NUMSTAT_FORMAT}",
+        f"--since={since_weeks} weeks ago", "--", *paths,
+    )
+
+
+def _iter_numstat_commits(raw_log):
+    """Yield structured commit records from `git log --numstat
+    --format=COMMIT %H %ae %aI %s` output. Each record is:
+
+        {"hash": str, "author": str, "date": str (ISO),
+         "msg": str (lowercased), "is_bugfix": bool,
+         "files": [(added: int, deleted: int, fname: str), ...]}
+
+    Binary files (added/deleted == "-") are coerced to 0/0. Commits with no
+    files (touch a path filtered out by --paths) yield with files=[].
+
+    Replaces the 3 hand-rolled COMMIT-line parsers in --predict, --carmack,
+    and the AXE-3 trend analysis. They all derived their per-file stats from
+    the same underlying record shape, just accumulated differently.
+    """
+    cur = None
+    for line in raw_log.split("\n"):
+        if line.startswith("COMMIT "):
+            if cur is not None:
+                yield cur
+            parts = line.split(" ", 4)
+            if len(parts) >= 5:
+                msg_lower = parts[4].lower()
+                cur = {
+                    "hash": parts[1],
+                    "author": parts[2],
+                    "date": parts[3],
+                    "msg": msg_lower,
+                    "is_bugfix": any(w in msg_lower for w in BUGFIX_KEYWORDS),
+                    "files": [],
+                }
+            else:
+                cur = None
+        elif "\t" in line and cur is not None:
+            parts = line.split("\t")
+            if len(parts) == 3:
+                added, deleted, fname = parts
+                a = int(added) if added.isdigit() else 0
+                d = int(deleted) if deleted.isdigit() else 0
+                cur["files"].append((a, d, fname.strip()))
+    if cur is not None:
+        yield cur
 
 
 def find_repo_root():
@@ -1451,8 +1514,7 @@ def predict_defects(root, weeks=8):
     files = [f for f in tracked.split("\n") if f.strip()]
 
     # Single git log call for all metrics
-    since = f"--since={weeks} weeks ago"
-    raw_log = _run_git(root, "log", "--numstat", "--format=COMMIT %H %ae %aI %s", since, "--", "*.py")
+    raw_log = _fetch_numstat_log(root, weeks)
 
     # Parse git log into per-file metrics
     file_stats = {}
@@ -1462,30 +1524,17 @@ def predict_defects(root, weeks=8):
         file_stats[f] = {"added": 0, "deleted": 0, "commits": [], "authors": set(),
                          "bugfixes": 0, "loc": max(loc, 1), "dates": []}
 
-    current_author = ""
-    current_date = ""
-    current_msg = ""
-    for line in raw_log.split("\n"):
-        if line.startswith("COMMIT "):
-            parts = line.split(" ", 4)
-            if len(parts) >= 5:
-                current_author = parts[2]
-                current_date = parts[3]
-                current_msg = parts[4].lower()
-        elif "\t" in line and current_date:
-            parts = line.split("\t")
-            if len(parts) == 3:
-                added, deleted, fname = parts
-                fname = fname.strip()
-                if fname in file_stats:
-                    s = file_stats[fname]
-                    s["added"] += int(added) if added != "-" else 0
-                    s["deleted"] += int(deleted) if deleted != "-" else 0
-                    s["commits"].append(current_date)
-                    s["authors"].add(current_author)
-                    s["dates"].append(current_date)
-                    if any(w in current_msg for w in ["fix", "bug", "patch", "repair", "crash"]):
-                        s["bugfixes"] += 1
+    for c in _iter_numstat_commits(raw_log):
+        for added, deleted, fname in c["files"]:
+            if fname in file_stats:
+                s = file_stats[fname]
+                s["added"] += added
+                s["deleted"] += deleted
+                s["commits"].append(c["date"])
+                s["authors"].add(c["author"])
+                s["dates"].append(c["date"])
+                if c["is_bugfix"]:
+                    s["bugfixes"] += 1
 
     # Compute raw metrics per file
     metrics = {}
@@ -2511,8 +2560,7 @@ def predict_carmack(root, weeks=8):
         return
     files = [f for f in tracked.split("\n") if f.strip()]
 
-    since = f"--since={weeks} weeks ago"
-    raw_log = _run_git(root, "log", "--numstat", "--format=COMMIT %H %ae %aI %s", since, "--", "*.py")
+    raw_log = _fetch_numstat_log(root, weeks)
 
     file_stats = {}
     for f in files:
@@ -2522,39 +2570,22 @@ def predict_carmack(root, weeks=8):
                          "bugfixes": 0, "loc": max(loc, 1), "dates": [],
                          "daily_churn": {}, "bugfix_dates": []}
 
-    current_author = ""
-    current_date = ""
-    current_msg = ""
-    for line in raw_log.split("\n"):
-        if line.startswith("COMMIT "):
-            parts = line.split(" ", 4)
-            if len(parts) >= 5:
-                current_author = parts[2]
-                current_date = parts[3]
-                current_msg = parts[4].lower()
-        elif "\t" in line and current_date:
-            parts = line.split("\t")
-            if len(parts) == 3:
-                added, deleted, fname = parts
-                fname = fname.strip()
-                if fname in file_stats:
-                    s = file_stats[fname]
-                    a = int(added) if added != "-" else 0
-                    d = int(deleted) if deleted != "-" else 0
-                    s["added"] += a
-                    s["deleted"] += d
-                    s["commits"].append(current_date)
-                    s["authors"].add(current_author)
-                    s["dates"].append(current_date)
-                    try:
-                        day = current_date[:10]
-                        s["daily_churn"][day] = s["daily_churn"].get(day, 0) + a + d
-                    except (ValueError, IndexError):
-                        pass
-                    is_bugfix = any(w in current_msg for w in ["fix", "bug", "patch", "repair", "crash"])
-                    if is_bugfix:
-                        s["bugfixes"] += 1
-                        s["bugfix_dates"].append(current_date)
+    for c in _iter_numstat_commits(raw_log):
+        date = c["date"]
+        day = date[:10] if len(date) >= 10 else ""
+        for a, d, fname in c["files"]:
+            if fname in file_stats:
+                s = file_stats[fname]
+                s["added"] += a
+                s["deleted"] += d
+                s["commits"].append(date)
+                s["authors"].add(c["author"])
+                s["dates"].append(date)
+                if day:
+                    s["daily_churn"][day] = s["daily_churn"].get(day, 0) + a + d
+                if c["is_bugfix"]:
+                    s["bugfixes"] += 1
+                    s["bugfix_dates"].append(date)
 
     # CARMACK 1: Real Newman Q via Louvain clustering on the import graph.
     # Score = how much the file binds its own cluster (0=bridge, 1=core binder).
@@ -2724,8 +2755,7 @@ def anomaly_detect(root, weeks=8):
         return
     files = [f for f in tracked.split("\n") if f.strip()]
 
-    since = f"--since={weeks} weeks ago"
-    raw_log = _run_git(root, "log", "--numstat", "--format=COMMIT %H %ae %aI %s", since, "--", "*.py")
+    raw_log = _fetch_numstat_log(root, weeks)
 
     file_stats = {}
     for f in files:
@@ -2734,29 +2764,16 @@ def anomaly_detect(root, weeks=8):
         file_stats[f] = {"added": 0, "deleted": 0, "commits": 0, "authors": set(),
                          "bugfixes": 0, "loc": max(loc, 1)}
 
-    current_author = ""
-    current_date = ""
-    current_msg = ""
-    for line in raw_log.split("\n"):
-        if line.startswith("COMMIT "):
-            parts = line.split(" ", 4)
-            if len(parts) >= 5:
-                current_author = parts[2]
-                current_date = parts[3]
-                current_msg = parts[4].lower()
-        elif "\t" in line and current_date:
-            parts = line.split("\t")
-            if len(parts) == 3:
-                added, deleted, fname = parts
-                fname = fname.strip()
-                if fname in file_stats:
-                    s = file_stats[fname]
-                    s["added"] += int(added) if added != "-" else 0
-                    s["deleted"] += int(deleted) if deleted != "-" else 0
-                    s["commits"] += 1
-                    s["authors"].add(current_author)
-                    if any(w in current_msg for w in ["fix", "bug", "patch", "repair", "crash"]):
-                        s["bugfixes"] += 1
+    for c in _iter_numstat_commits(raw_log):
+        for added, deleted, fname in c["files"]:
+            if fname in file_stats:
+                s = file_stats[fname]
+                s["added"] += added
+                s["deleted"] += deleted
+                s["commits"] += 1
+                s["authors"].add(c["author"])
+                if c["is_bugfix"]:
+                    s["bugfixes"] += 1
 
     metrics_list = []
     active_files = []
