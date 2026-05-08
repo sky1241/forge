@@ -8,6 +8,62 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.0.1] - 2026-05-08
+
+Patch release that fixes 8 audit findings caught after v1.0.0 was
+tagged. The big one: `forge --mutate` and `forge --locate` now exit
+non-zero when their optional dep is missing (was exit 0 — silently
+breaking CI scripts shaped like `forge --mutate && deploy`). Also
+adds a real `--version` flag and tightens user-facing UX/docs.
+
+### Fixed
+- **`forge --mutate` and `forge --locate` exit non-zero** when their
+  optional dep (libcst / coverage+pytest-cov) is missing. Pre-1.0.1
+  the install hint printed but exit code was 0 — a CI script using
+  `&&` chaining would proceed silently. (cycle 4 H-1, B1)
+- **`fault_locate` signature** changed from `-> None` to `-> bool`
+  so callers can branch on dep-missing vs dep-present. (cycle 4 H-1)
+- **User hints "Run: forge.py --init / --baseline"** now correctly
+  say `forge --init` / `forge --baseline` (the entry point installed
+  by `pip install`, not the run-from-checkout invocation).
+  (cycle 4 H-3, B3)
+- **`find_repo_root` fall-through** now warns explicitly when no
+  `.git/` is found walking up. Previously silent → users got cryptic
+  "Git not available" lines mid-output for --carmack/--predict/etc.
+  (cycle 4 H-3, B4)
+- **`.forge/config.json` decode failure** now prints a Warning and
+  uses defaults. Was silent → users assumed their config was loaded
+  while in reality every knob was at default. (cycle 4 H-3, B5)
+- **`init_repo` `write_text`** sites now pass `encoding="utf-8"`
+  explicitly. On Windows the default was CP1252-locale-dependent.
+  (cycle 4 H-3, B7)
+
+### Added
+- **`forge --version`** prints `forge-shield X.Y.Z` and exits 0.
+  Sourced from `importlib.metadata.version("forge-shield")` so it
+  can never drift from `pyproject.toml`. Two defensive fallbacks:
+  `0.0.0-dev` for run-from-checkout, `unknown` for embed contexts.
+  (cycle 4 H-2, B2)
+- **README "All subcommands" table** lists the 16 most-used
+  invocations with one-line descriptions; trailer points at
+  `--help` for the full flag list. (cycle 4 H-5, B8)
+- **Subprocess test suite for fail-fast exit codes**: 3 new tests
+  in `tests/test_cli_entry_point.py` (mutate-without-libcst,
+  locate-without-coverage, --version) using a throwaway venv with
+  forge installed core-only. Real-behavior tests, not source-greppy.
+  (cycle 4 H-1 + H-2)
+- **`@pytest.mark.skipif(sys.platform == "win32")`** on
+  `test_log_run_concurrent_writes_keep_line_integrity` so the
+  Windows CI matrix (Phase G) doesn't go red on a known-deferred
+  fcntl gap. (cycle 4 H-4, B6)
+
+### Changed
+- **`Development Status` classifier** bumped from `4 - Beta` to
+  `5 - Production/Stable`. Was kept Beta in v1.0.0 to respect the
+  "no drive-by" constraint of the release commit. (cycle 4 H-5, B10)
+- **`pytest-cov` install hint** in `fault_locate` now points at the
+  cycle 4 E-2 extra: `pip install 'forge-shield[locate]'`. (cycle 4 H-1)
+
 ## [1.0.0] - 2026-05-08
 
 First public PyPI release. Bundles the full cycle 4 work — type hints
@@ -147,5 +203,6 @@ mypy `--strict` passes the entire codebase.
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/sky1241/forge/releases/tag/v1.0.1
 [1.0.0]: https://github.com/sky1241/forge/releases/tag/v1.0.0
