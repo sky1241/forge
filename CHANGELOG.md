@@ -8,6 +8,47 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.1.0] - 2026-05-09
+
+Minor release. Adds `forge --fast-deep` for transitive impact-based
+test selection, fixes a long-standing false-positive/negative bug in
+`find_impacted_tests` (B23). Also incorporates the cycle 6
+`--incremental-mutate` innovation (sky-master Round 1 winner).
+
+### Added
+- **`forge --fast-deep`** — Bazel/Buck-style transitive closure on
+  the inverted import graph. When a leaf changes, every test that
+  transitively depends on it is selected. Two safeguards:
+  `fast_deep_max_depth` (default 5, BFS hop cap) and
+  `fast_deep_fanout_cap_pct` (default 80, falls back to full suite if
+  selection > 80% of total tests). Both cfg-tunable. (cycle 7 L-2)
+- **`forge --incremental-mutate`** — libcst AST-diff based mutation
+  that mutes only the nodes added/modified between HEAD and a
+  baseline commit. Speedup vs full `--mutate` is proportional to the
+  diff size. (cycle 6 sky-master, merged from feat/incremental-mutate)
+
+### Fixed
+- **`find_impacted_tests` substring matching → AST-based imports
+  (B23)** — pre-1.1.0, the impact detector used `if mod in content`
+  which produced both:
+    - false positives (a test mentioning the module name only in a
+      comment / docstring was flagged as impacted), and
+    - false negatives (`from X import Y as Z` then uses of `Z`
+      left no `X` token visible to substring matching).
+  Now walks `ast.parse` looking at `Import` and `ImportFrom` nodes,
+  resolves dotted-import paths so a change to `pkg/sub.py` matches
+  `from pkg.sub import X` and `import pkg.sub`. Conservative
+  fallback: tests with syntax errors are treated as impacted (better
+  surface than silently skip). (cycle 7 L-1)
+
+### Internal
+- forge.py 4400+ LOC, 231 default + 1 slow tests pass on Linux/
+  macOS/Windows × Python 3.11/3.12/3.13.
+- Coverage 77%+ via cycle 5 K-6 fault_locate end-to-end test.
+- Zero `# type: ignore` actif in forge.py.
+- mypy --strict passes cross-version (1.20.x + 2.0.x) and
+  cross-platform (--platform=linux/win32/darwin).
+
 ## [1.0.4] - 2026-05-08
 
 Patch release that addresses 4 findings caught by the deep 4-agent
@@ -328,7 +369,8 @@ mypy `--strict` passes the entire codebase.
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/v1.0.4...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/sky1241/forge/releases/tag/v1.1.0
 [1.0.4]: https://github.com/sky1241/forge/releases/tag/v1.0.4
 [1.0.3]: https://github.com/sky1241/forge/releases/tag/v1.0.3
 [1.0.2]: https://github.com/sky1241/forge/releases/tag/v1.0.2

@@ -74,7 +74,8 @@ pip install 'forge-shield[all]'      # everything above
 | `forge --add "DESC"` | Log a bug in BUGS.md |
 | `forge --close BUG-ID` | Mark a bug fixed |
 | `forge --watch` | Auto re-run on file change |
-| `forge --fast` | Run only impacted tests |
+| `forge --fast` | Run only directly-impacted tests (1-hop) |
+| `forge --fast-deep` | Transitive impact via inverted import graph (Bazel-style) |
 | `forge --full-cycle` | Run the full pipeline |
 
 `forge --help` for the complete flag list and examples; `forge --version` to print the installed version.
