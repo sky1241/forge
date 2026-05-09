@@ -3008,11 +3008,82 @@ def _try_one_mutant(
         src.write_text(original, encoding="utf-8")
 
 
+def _get_changed_lines(
+    root: Path, source_path: Path, since_commit: str,
+) -> set[int]:
+    """Return the line numbers (in current HEAD source_path) that were
+    added or modified since `since_commit`. Used by --incremental-mutate
+    to scope mutation testing to the diff instead of the full file.
+
+    Implementation: parse `git diff --unified=0 since_commit -- source_path`,
+    extract the `+X,Y` ranges from the hunk headers (ignoring `-X,Y`
+    deletions which don't have HEAD lines to mutate). Empty set means
+    either no changes or git couldn't compute the diff (caller decides
+    if that's a no-op or an error).
+
+    Cycle 6 — sky-master innovation `--incremental-mutate`. Combined
+    with libcst (cycle 4 D-3b) which by-construction avoids invalid
+    mutants, this gives a fast PR-review feedback loop: mutate only the
+    code the user actually changed, not the 4000+ unchanged lines.
+    """
+    rel = source_path.resolve().relative_to(root.resolve())
+    out = _run_git_full(
+        root, "diff", "--unified=0", since_commit, "--", str(rel),
+    )
+    if out.returncode != 0:
+        return set()
+    lines: set[int] = set()
+    # Hunk headers look like `@@ -L_old,N_old +L_new,N_new @@ optional`.
+    # We only care about `+L_new,N_new` (lines present in HEAD); deletions
+    # don't have HEAD-side lines to mutate. N_new can be omitted (defaults
+    # to 1) or 0 (pure deletion, no HEAD lines to add).
+    hunk_re = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@")
+    for line in out.stdout.split("\n"):
+        m = hunk_re.match(line)
+        if not m:
+            continue
+        start = int(m.group(1))
+        count = int(m.group(2)) if m.group(2) else 1
+        if count == 0:
+            continue  # pure deletion, no HEAD lines
+        for ln in range(start, start + count):
+            lines.add(ln)
+    return lines
+
+
+def _detect_changed_py_files(root: Path, since_commit: str) -> list[Path]:
+    """List the .py files that changed in `since_commit..HEAD`.
+    Used by --incremental-mutate when no explicit target is given —
+    auto-detect what the user touched in the diff range.
+    """
+    out = _run_git_full(
+        root, "diff", "--name-only", "--diff-filter=AMR",
+        since_commit, "--", "*.py",
+    )
+    if out.returncode != 0:
+        return []
+    files: list[Path] = []
+    for name in out.stdout.split("\n"):
+        name = name.strip()
+        if not name or "test_" in name:
+            continue
+        p = root / name
+        if p.exists():
+            files.append(p)
+    return files
+
+
 def run_mutation(
     root: Path, target_file: str | None = None, cfg: dict[str, Any] | None = None,
+    incremental_since: str | None = None,
 ) -> float | None:
     """Mutation testing via libcst (AST-aware). Offutt 1996: 5 operators suffice.
-    Mutation score = killed / total. Target: >80%."""
+    Mutation score = killed / total. Target: >80%.
+
+    If `incremental_since` is given, only mutates lines that changed in
+    `incremental_since..HEAD` (cycle 6 --incremental-mutate). Auto-detects
+    target files from the diff if `target_file` is None.
+    """
     try:
         import libcst  # noqa: F401
     except ImportError:
@@ -3025,6 +3096,12 @@ def run_mutation(
         if not target.is_absolute():
             target = root / target
         targets = [target] if target.exists() else []
+    elif incremental_since:
+        # --incremental-mutate without explicit target → auto-detect from diff
+        targets = _detect_changed_py_files(root, incremental_since)
+        if not targets:
+            print(f"  No .py files changed since {incremental_since}.")
+            return None
     else:
         # All tracked .py files (non-test)
         tracked = _run_git(root, "ls-files", "*.py")
@@ -3085,10 +3162,27 @@ def run_mutation(
 
     for src in targets:
         original = src.read_text(encoding="utf-8", errors="replace")
-        mutants = list(_generate_mutants(src))
-        if not mutants:
+        all_mutants = list(_generate_mutants(src))
+        if not all_mutants:
             continue
-        print(f"  {src.name}: {len(mutants)} mutants", end="", flush=True)
+        if incremental_since:
+            # Filter mutants by changed-line set (cycle 6 --incremental-mutate).
+            # Empty changed-lines means the file appears in --name-only diff
+            # but its individual hunks didn't add HEAD-side lines (rename-only,
+            # whitespace-only, mode change). Skip cleanly with a note.
+            changed = _get_changed_lines(root, src, incremental_since)
+            mutants = [m for m in all_mutants if m[0] in changed]
+            if not mutants:
+                print(f"  {src.name}: 0 mutants on diff (full would be "
+                      f"{len(all_mutants)})")
+                continue
+            ratio = len(mutants) / len(all_mutants) if all_mutants else 0.0
+            print(f"  {src.name}: {len(mutants)} mutants on diff "
+                  f"(vs {len(all_mutants)} full, {ratio:.0%} of full)",
+                  end="", flush=True)
+        else:
+            mutants = all_mutants
+            print(f"  {src.name}: {len(mutants)} mutants", end="", flush=True)
         for line_no, op, orig_line, mut_line, mut_source in mutants:
             outcome = _try_one_mutant(
                 src, original, mut_source,
@@ -3915,9 +4009,10 @@ KNOWN_FLAGS = {
     "--help", "--version", "--baseline", "--init", "--fast", "--watch", "--full-cycle",
     "--carmack", "--anomaly", "--heatmap", "--locate", "--predict", "--modularity",
     "--snapshot-check", "--diff", "--verbose", "--include-destructive",
+    "--incremental-mutate",
     # flags that take a value
     "--bisect", "--add", "--close", "--minimize", "--gen-props",
-    "--mutate", "--snapshot", "--paths-to-mutate",
+    "--mutate", "--snapshot", "--paths-to-mutate", "--since",
     # numeric value flags (also accept "--flaky" without a value → default runs)
     "--flaky", "--flaky-dtw", "--weeks",
 }
@@ -3939,7 +4034,7 @@ _NUMERIC_VALUE_FLAGS = {"--weeks", "--flaky", "--flaky-dtw"}
 # every time are listed here.
 _REQUIRES_VALUE = {
     "--mutate", "--bisect", "--close", "--minimize", "--gen-props",
-    "--snapshot", "--add", "--weeks", "--paths-to-mutate",
+    "--snapshot", "--add", "--weeks", "--paths-to-mutate", "--since",
 }
 
 # What kind of value each flag expects, for clearer error messages.
@@ -3953,6 +4048,7 @@ _VALUE_DESCRIPTION = {
     "--add": "a bug description (multi-word ok)",
     "--weeks": "a non-negative integer (history horizon)",
     "--paths-to-mutate": "a path to the single file to mutate (validated)",
+    "--since": "a git commit ref (sha, tag, branch) — baseline for --incremental-mutate",
 }
 
 
@@ -4008,9 +4104,11 @@ def _validate_args(args: list[str]) -> None:
             nxt = args[i + 1] if i + 1 < len(args) else None
             # Cycle 5 P1: `forge --mutate --paths-to-mutate FILE` is valid;
             # --paths-to-mutate carries the target, not the next positional.
+            # Cycle 6 sky-master: `forge --mutate --incremental-mutate` valid
+            # too — incremental mode auto-detects target from git diff.
             # Skip the value-required check for --mutate when the next arg
-            # is the explicit --paths-to-mutate flag.
-            if a == "--mutate" and nxt == "--paths-to-mutate":
+            # is one of these companion flags.
+            if a == "--mutate" and nxt in ("--paths-to-mutate", "--incremental-mutate"):
                 i += 1
                 continue
             if nxt is None or nxt == "" or nxt.startswith("-"):
@@ -4185,6 +4283,18 @@ def main() -> None:
         print("  Usage: forge --mutate --paths-to-mutate path/to/file.py")
         sys.exit(2)
 
+    # Cycle 6 sky-master: --incremental-mutate is meaningless without --mutate.
+    # --since is meaningless without --incremental-mutate. Same rejection
+    # pattern as --paths-to-mutate (B20).
+    if "--incremental-mutate" in args and "--mutate" not in args:
+        print("  ERROR: --incremental-mutate must be combined with --mutate")
+        print("  Usage: forge --mutate --incremental-mutate [--since COMMIT]")
+        sys.exit(2)
+    if "--since" in args and "--incremental-mutate" not in args:
+        print("  ERROR: --since requires --incremental-mutate")
+        print("  Usage: forge --mutate --incremental-mutate --since COMMIT")
+        sys.exit(2)
+
     if "--mutate" in args:
         idx = args.index("--mutate")
         target: str | None = (
@@ -4216,8 +4326,29 @@ def main() -> None:
                       f"{_safe_path(ptm_path)}")
                 sys.exit(2)
             target = str(ptm_path)
+        # Cycle 6 sky-master innovation: --incremental-mutate scopes mutation
+        # to lines that changed since a baseline commit. Default since =
+        # `git merge-base HEAD origin/main` (the PR base) when available, else
+        # HEAD~1 (last commit). User can override via --since COMMIT.
+        incremental_since: str | None = None
+        if "--incremental-mutate" in args:
+            if "--since" in args:
+                si = args.index("--since")
+                incremental_since = args[si + 1]
+            else:
+                # Try `git merge-base HEAD origin/main` first (PR review use case),
+                # fall back to HEAD~1 (last commit, hook use case).
+                merge_base = _run_git_full(
+                    root, "merge-base", "HEAD", "origin/main",
+                )
+                if merge_base.returncode == 0 and merge_base.stdout.strip():
+                    incremental_since = merge_base.stdout.strip()
+                else:
+                    incremental_since = "HEAD~1"
+            print(f"  incremental mode: --since {incremental_since[:12]}")
         cfg = _load_forge_config(root)
-        score = run_mutation(root, target, cfg=cfg)
+        score = run_mutation(root, target, cfg=cfg,
+                              incremental_since=incremental_since)
         if score is None:
             sys.exit(1)
         if score < cfg["mutation_threshold_pct"]:

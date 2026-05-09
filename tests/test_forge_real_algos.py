@@ -3301,7 +3301,9 @@ class TestCycle5P1PathsToMutate:
         (tmp_path / "file_b.py").write_text("def mul(a, b): return a * b\n")
         captured: dict[str, Any] = {"target": "<unset>"}
 
-        def fake_run_mutation(root, target, cfg=None):
+        def fake_run_mutation(root, target, cfg=None, **_kwargs):
+            # **_kwargs absorbs incremental_since (cycle 6) without coupling
+            # this test to flags it doesn't exercise.
             captured["target"] = target
             return 100.0  # 100% kill rate (pct, not ratio); won't trip sys.exit
 
@@ -3484,3 +3486,164 @@ class TestCycle5P3Modularity:
         # (or fair) — never low. The exact verdict depends on Louvain
         # output but the bands are pulled from cfg, not hardcoded.
         assert result["verdict"] in ("good", "fair")
+
+
+# ============================================================================
+# Cycle 6 sky-master innovation — `forge --incremental-mutate`
+# ============================================================================
+
+
+class TestCycle6IncrementalMutate:
+    """Cycle 6 sky-master proposal: scope mutation testing to lines that
+    changed since a baseline commit. Combined with libcst (cycle 4 D-3b),
+    gives fast PR-review feedback by mutating only the diff, not the full
+    file. See `_get_changed_lines` and `run_mutation(incremental_since=...)`.
+    """
+
+    def _git_init_with_commit(self, path: Path, content: str) -> str:
+        """Init a git repo at path with a single committed file. Returns
+        the commit hash (the baseline against which incremental tests run)."""
+        subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"],
+                       cwd=str(path), check=True)
+        subprocess.run(["git", "config", "user.name", "t"],
+                       cwd=str(path), check=True)
+        (path / "src.py").write_text(content)
+        subprocess.run(["git", "add", "."], cwd=str(path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(path), check=True)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(path),
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def test_get_changed_lines_returns_added_line_numbers(
+        self, tmp_path: Path,
+    ) -> None:
+        """Add lines after baseline → returned set contains exactly those
+        new line numbers (HEAD-side)."""
+        baseline = self._git_init_with_commit(
+            tmp_path, "def f():\n    return 1\n",
+        )
+        # Add 3 lines after baseline
+        (tmp_path / "src.py").write_text(
+            "def f():\n    return 1\n\ndef g():\n    return 2\n",
+        )
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "add g"],
+                       cwd=str(tmp_path), check=True)
+
+        changed = forge._get_changed_lines(
+            tmp_path, tmp_path / "src.py", baseline,
+        )
+        # Lines 3-5 are new (3 = blank, 4 = def g, 5 = return)
+        # `git diff --unified=0` reports `+3,3` so lines {3,4,5}
+        assert 4 in changed, f"line 4 (def g) must be in changed: {changed}"
+        assert 5 in changed, f"line 5 (return 2) must be in changed: {changed}"
+        # Original lines 1-2 unchanged
+        assert 1 not in changed
+        assert 2 not in changed
+
+    def test_get_changed_lines_empty_when_no_diff(
+        self, tmp_path: Path,
+    ) -> None:
+        """No commits after baseline → empty set."""
+        baseline = self._git_init_with_commit(
+            tmp_path, "def f():\n    return 1\n",
+        )
+        changed = forge._get_changed_lines(
+            tmp_path, tmp_path / "src.py", baseline,
+        )
+        assert changed == set()
+
+    def test_detect_changed_py_files_excludes_tests(
+        self, tmp_path: Path,
+    ) -> None:
+        """Helper auto-detects changed .py files but skips test_*.py
+        (mutation testing of test files makes no sense)."""
+        baseline = self._git_init_with_commit(
+            tmp_path, "def f(): pass\n",
+        )
+        (tmp_path / "newcode.py").write_text("def g(): pass\n")
+        (tmp_path / "test_newcode.py").write_text("def test_g(): pass\n")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "two new files"],
+                       cwd=str(tmp_path), check=True)
+
+        files = forge._detect_changed_py_files(tmp_path, baseline)
+        names = {f.name for f in files}
+        assert "newcode.py" in names
+        assert "test_newcode.py" not in names, (
+            f"test files must be excluded from incremental mutate: {names}"
+        )
+
+    def test_incremental_mutate_filters_mutants_to_diff_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: --incremental-mutate filters mutants to lines that
+        changed. The full file has N mutants, the diff has M < N, run_mutation
+        in incremental mode generates exactly M (verifiable via captured
+        mutants count)."""
+        # Repo with 3 functions, baseline commit covers function 1 only
+        baseline_content = "def add(a, b):\n    return a + b\n"
+        baseline = self._git_init_with_commit(tmp_path, baseline_content)
+        # After baseline: add 2 more functions with several mutable sites
+        new_content = (
+            "def add(a, b):\n    return a + b\n\n"  # original (line 1-2)
+            "def is_pos(n):\n    return n > 0\n\n"  # new ROR site (line 4-5)
+            "def square(x):\n    return x * x\n"     # new AOR site (line 7-8)
+        )
+        (tmp_path / "src.py").write_text(new_content)
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "add 2 fns"],
+                       cwd=str(tmp_path), check=True)
+
+        full_mutants = list(forge._generate_mutants(tmp_path / "src.py"))
+        changed_lines = forge._get_changed_lines(
+            tmp_path, tmp_path / "src.py", baseline,
+        )
+        diff_mutants = [m for m in full_mutants if m[0] in changed_lines]
+
+        # Sanity: full has the original `+` op (line 2) AND the new `>` and
+        # `*` ops (lines 5, 8). Diff has only the latter two.
+        assert len(full_mutants) > len(diff_mutants), (
+            f"diff must be a strict subset of full; "
+            f"full={len(full_mutants)}, diff={len(diff_mutants)}"
+        )
+        assert len(diff_mutants) >= 2, (
+            f"expected ≥2 diff mutants (ROR `>`, AOR `*`); "
+            f"got {len(diff_mutants)}: {diff_mutants}"
+        )
+        # The original `+` mutant must NOT be in the diff set (line 2 unchanged)
+        for m in diff_mutants:
+            line, op, _orig, _mut, _src = m
+            assert line in changed_lines, (
+                f"diff mutant on line {line} but only {changed_lines} changed"
+            )
+
+    def test_incremental_mutate_without_mutate_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys,
+    ) -> None:
+        """`forge --incremental-mutate` without --mutate is meaningless."""
+        monkeypatch.setattr(sys, "argv", ["forge", "--incremental-mutate"])
+        monkeypatch.setattr(forge, "find_repo_root", lambda: tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            forge.main()
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "must be combined with --mutate" in out
+
+    def test_since_without_incremental_mutate_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys,
+    ) -> None:
+        """`forge --since X` without --incremental-mutate is meaningless."""
+        monkeypatch.setattr(
+            sys, "argv",
+            ["forge", "--mutate", "forge.py", "--since", "HEAD~1"],
+        )
+        monkeypatch.setattr(forge, "find_repo_root", lambda: tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            forge.main()
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "--since requires --incremental-mutate" in out
