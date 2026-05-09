@@ -185,6 +185,17 @@ FORGE_CONFIG_DEFAULTS = {
     # more permissive policies in `.forge/config.json`.
     "modularity_q_good_threshold": 0.30,
     "modularity_q_poor_threshold": 0.15,
+    # Cycle 7 L-2: `forge --fast-deep` transitive impact selection.
+    # Cap depth — BFS through the inverted import graph stops at this
+    # number of hops. 5 is a reasonable balance between catching real
+    # transitive regressions (deeper than the 1-hop --fast) and not
+    # selecting almost the whole suite on highly-coupled codebases.
+    "fast_deep_max_depth": 5,
+    # Cap fanout (% of total tests). If --fast-deep would select more
+    # than this fraction of the suite, fall back to running the full
+    # suite — at high fanout, the impact-selection overhead exceeds
+    # the speedup. Bazel/Buck use a similar safeguard.
+    "fast_deep_fanout_cap_pct": 80,
 }
 
 
@@ -2002,6 +2013,154 @@ def run_fast(root: Path, verbose: bool = False) -> None:
     bar = "=" * 50
     print(f"\n{bar}")
     print(f"  FAST MODE — {passed + failed} tests in {duration:.1f}s")
+    print(f"  Passed: {passed}  Failed: {failed}")
+    if failed > 0:
+        for match in re.finditer(r"FAILED\s+(.*?)$", output, re.MULTILINE):
+            print(f"    [FAIL] {match.group(1).strip()}")
+    print(f"{bar}\n")
+
+
+def _invert_import_graph(graph: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Cycle 7 L-2: invert direct `_build_import_graph` so we can ask
+    "who imports X" instead of "what does X import". Used by
+    --fast-deep to BFS from changed files outward to their importers."""
+    inv: dict[str, list[str]] = {f: [] for f in graph}
+    for src, targets in graph.items():
+        for tgt in targets:
+            inv.setdefault(tgt, []).append(src)
+    return inv
+
+
+def _bfs_transitive_importers(
+    inv_graph: dict[str, list[str]], seeds: set[str], max_depth: int,
+) -> tuple[set[str], int]:
+    """BFS through the inverted import graph from `seeds` up to
+    `max_depth` hops. Returns (visited set, max hop observed).
+    Handles cycles (X→Y→X) by tracking visited set."""
+    visited: set[str] = set()
+    frontier = {s for s in seeds if s in inv_graph or any(s in v for v in inv_graph.values())}
+    if not frontier:
+        # Seed not in graph — no importers reachable
+        return set(seeds), 0
+    visited.update(frontier)
+    max_hop = 0
+    for hop in range(1, max_depth + 1):
+        next_frontier: set[str] = set()
+        for f in frontier:
+            for importer in inv_graph.get(f, []):
+                if importer not in visited:
+                    next_frontier.add(importer)
+        if not next_frontier:
+            break
+        visited.update(next_frontier)
+        max_hop = hop
+        frontier = next_frontier
+    return visited, max_hop
+
+
+def find_impacted_tests_transitive(
+    root: Path, changed_files: set[str], max_depth: int,
+) -> tuple[list[Path], int]:
+    """Cycle 7 L-2: transitive version of `find_impacted_tests`. Combines
+    the AST-based direct match (L-1 fix) with a BFS over the inverted
+    import graph so test_A is selected when A→B→C and C changes.
+
+    Returns (impacted_test_files, max_hop_observed). max_hop = 0 means
+    only direct (1-hop) impact found; ≥ 1 means transitive closures fired.
+    """
+    direct = find_impacted_tests(root, changed_files)
+    direct_set = set(direct)
+
+    graph = _build_import_graph(root)
+    inv = _invert_import_graph(graph)
+    transitive_files, max_hop = _bfs_transitive_importers(inv, changed_files, max_depth)
+
+    # Filter for test files only (the BFS visited set contains all
+    # transitively-reachable files; we only care about the test ones).
+    test_files = find_tests(root)
+    impacted: list[Path] = list(direct_set)
+    for tf in test_files:
+        try:
+            rel = str(tf.relative_to(root))
+        except ValueError:
+            rel = str(tf)
+        # Normalize separator for cross-platform (cycle 4 J-2 lesson)
+        rel_posix = rel.replace("\\", "/")
+        if rel in transitive_files or rel_posix in transitive_files:
+            if tf not in direct_set:
+                impacted.append(tf)
+    return sorted(set(impacted)), max_hop
+
+
+def run_fast_deep(root: Path, *, verbose: bool = False) -> None:
+    """Cycle 7 L-2: transitive-closure version of `--fast`. BFS through
+    the inverted import graph from git-changed files up to
+    `cfg["fast_deep_max_depth"]` hops, run the impacted test set.
+
+    Cap fanout: if the selection would exceed `fast_deep_fanout_cap_pct`%
+    of the suite, fall back to running the full suite (the BFS overhead
+    + per-test pytest cost exceeds the speedup at high fanout, like
+    Bazel/Buck heuristics).
+    """
+    cfg = _load_forge_config(root)
+    max_depth = cfg["fast_deep_max_depth"]
+    fanout_cap_pct = cfg["fast_deep_fanout_cap_pct"]
+    impacted_timeout = cfg["impacted_tests_timeout_seconds"]
+
+    changed = get_changed_files(root)
+    if not changed:
+        print("  No changes detected since last commit. Nothing to test.")
+        print("  Tip: forge --fast-deep looks at git diff HEAD.")
+        return
+
+    print(f"  Changed files: {len(changed)}")
+    for f in sorted(changed)[:10]:
+        print(f"    {f}")
+    if len(changed) > 10:
+        print(f"    ... and {len(changed) - 10} more")
+
+    all_tests = find_tests(root)
+    impacted, max_hop = find_impacted_tests_transitive(root, changed, max_depth)
+    n_total = len(all_tests)
+    n_selected = len(impacted)
+
+    # Cap fanout
+    if n_total > 0 and (n_selected * 100) / n_total > fanout_cap_pct:
+        print(f"  fast-deep would select {n_selected}/{n_total} tests "
+              f"(> {fanout_cap_pct}%), falling back to --full mode")
+        results = run_tests(root, verbose=verbose)
+        baseline = load_json(str(root / BASELINE_FILE))
+        print_report(results, baseline)
+        return
+
+    print(f"  fast-deep: {n_selected}/{n_total} tests selected "
+          f"(transitive depth ≤ {max_depth}, max hop observed = {max_hop})")
+
+    if not impacted:
+        print("  No transitively-impacted tests. Run full suite with: forge")
+        return
+
+    cmd = _pytest_cmd(*[str(f) for f in impacted],
+                      "-v", "--tb=short", "-q", "--no-header")
+    start = time.time()
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(root),
+            timeout=impacted_timeout, encoding="utf-8", errors="replace",
+        )
+        output = result.stdout + result.stderr
+    except subprocess.TimeoutExpired:
+        print(f"  TIMEOUT after {impacted_timeout}s")
+        return
+
+    duration = time.time() - start
+    summary_p = re.search(r"(\d+) passed", output)
+    summary_f = re.search(r"(\d+) failed", output)
+    passed = int(summary_p.group(1)) if summary_p else 0
+    failed = int(summary_f.group(1)) if summary_f else 0
+    bar = "=" * 50
+    print(f"\n{bar}")
+    print(f"  FAST-DEEP MODE — {passed + failed} tests in {duration:.1f}s")
     print(f"  Passed: {passed}  Failed: {failed}")
     if failed > 0:
         for match in re.finditer(r"FAILED\s+(.*?)$", output, re.MULTILINE):
@@ -4024,7 +4183,8 @@ USAGE
   forge                            run tests vs baseline (default)
   forge --baseline                 run tests AND save as new baseline
   forge --init                     scaffold .forge/, BUGS.md, save first baseline
-  forge --fast [-v]                run only tests changed since last commit
+  forge --fast [-v]                run only tests changed since last commit (1-hop direct impact)
+  forge --fast-deep [-v]           transitive impact via inverted import graph (Bazel-style)
   forge --watch                    auto re-run on .py file change
 
 ANALYTICS
@@ -4071,7 +4231,7 @@ KNOWN_FLAGS = {
     # short flags
     "-h", "-v",
     # boolean / action flags (no value, or value provided as next non-flag arg)
-    "--help", "--version", "--baseline", "--init", "--fast", "--watch", "--full-cycle",
+    "--help", "--version", "--baseline", "--init", "--fast", "--fast-deep", "--watch", "--full-cycle",
     "--carmack", "--anomaly", "--heatmap", "--locate", "--predict", "--modularity",
     "--snapshot-check", "--diff", "--verbose", "--include-destructive",
     "--incremental-mutate",
@@ -4286,6 +4446,14 @@ def main() -> None:
             print("  Usage: forge.py --bisect test_name")
             return
         bisect_test(root, test_name)
+        return
+
+    # Order matters: `--fast-deep` is checked before `--fast` because
+    # "--fast" in args is a substring-style membership test on the LIST,
+    # not the string — but if both flags coexist (rare) we want the
+    # more-specific one to win. Today they're disjoint.
+    if "--fast-deep" in args:
+        run_fast_deep(root, verbose="--verbose" in args or "-v" in args)
         return
 
     if "--fast" in args:

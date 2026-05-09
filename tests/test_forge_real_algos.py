@@ -1082,6 +1082,99 @@ class TestCycle7L1FindImpactedTestsAst:
         )
 
 
+class TestCycle7L2FastDeepTransitive:
+    """Cycle 7 L-2: `forge --fast-deep` transitive closure on the
+    inverted import graph. A→B→C with C changed → test_A is selected.
+    With safeguards: cap depth (default 5), cap fanout (default 80%).
+    """
+
+    def test_fast_deep_catches_transitive_2_hop(self, tmp_path):
+        """3-file chain a→b→c. Modify c. test_a (which imports a)
+        must be in the impacted set even though it never mentions c."""
+        _git_init(tmp_path)
+        (tmp_path / "c.py").write_text("def leaf(): return 'c'\n")
+        (tmp_path / "b.py").write_text("from c import leaf\ndef bridge(): return leaf()\n")
+        (tmp_path / "a.py").write_text("from b import bridge\ndef top(): return bridge()\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text(
+            "from a import top\ndef test_a(): assert top() == 'c'\n"
+        )
+        _git_commit(tmp_path)
+        impacted, max_hop = forge.find_impacted_tests_transitive(
+            tmp_path, {"c.py"}, max_depth=5,
+        )
+        names = [p.name for p in impacted]
+        assert "test_a.py" in names, (
+            f"test_a should be selected via transitive a→b→c chain; got {names}"
+        )
+        assert max_hop >= 2, (
+            f"BFS should report ≥ 2 hops for c→b→a chain; got {max_hop}"
+        )
+
+    def test_fast_deep_respects_max_depth_cap(self, tmp_path):
+        """5-file chain with max_depth=2 stops after 2 hops, so the
+        test 3 hops away is NOT in impacted set."""
+        _git_init(tmp_path)
+        (tmp_path / "leaf.py").write_text("def f(): return 0\n")
+        (tmp_path / "h1.py").write_text("from leaf import f\ndef h1(): return f()\n")
+        (tmp_path / "h2.py").write_text("from h1 import h1\ndef h2(): return h1()\n")
+        (tmp_path / "h3.py").write_text("from h2 import h2\ndef h3(): return h2()\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_h3.py").write_text(
+            "from h3 import h3\ndef test_h3(): assert h3() == 0\n"
+        )
+        _git_commit(tmp_path)
+        impacted, max_hop = forge.find_impacted_tests_transitive(
+            tmp_path, {"leaf.py"}, max_depth=2,
+        )
+        names = [p.name for p in impacted]
+        # test_h3 is at hop 4 from leaf (leaf→h1→h2→h3→test_h3); cap 2
+        # truncates the BFS before reaching test_h3.
+        assert "test_h3.py" not in names, (
+            f"max_depth=2 must cap BFS before 3+ hops; got {names}"
+        )
+        assert max_hop <= 2, f"max_hop should be ≤ 2; got {max_hop}"
+
+    def test_fast_deep_handles_import_cycles(self, tmp_path):
+        """Cyclic imports A↔B must not produce infinite BFS."""
+        _git_init(tmp_path)
+        # Real circular import would crash Python at runtime, but the
+        # AST graph builder doesn't execute — it only sees the symbols.
+        (tmp_path / "a.py").write_text("from b import b_func\ndef a_func(): pass\n")
+        (tmp_path / "b.py").write_text("from a import a_func\ndef b_func(): pass\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text(
+            "import a\ndef test_a(): assert hasattr(a, 'a_func')\n"
+        )
+        _git_commit(tmp_path)
+        # Should terminate (visited set prevents revisit). Not asserting
+        # specific test selection — just no infinite loop.
+        impacted, max_hop = forge.find_impacted_tests_transitive(
+            tmp_path, {"a.py"}, max_depth=5,
+        )
+        # max_hop <= 5 always (the cap), but the test that this returns
+        # at all is the contract.
+        assert max_hop <= 5
+        # Just structurally: function returned with a list (no infinite recursion)
+        assert isinstance(impacted, list)
+
+    def test_invert_import_graph_basic(self):
+        """`_invert_import_graph` flips edges: X imports Y → Y has X
+        in inverse[Y]'s list."""
+        graph = {
+            "a.py": ["b.py", "c.py"],
+            "b.py": ["c.py"],
+            "c.py": [],
+        }
+        inv = forge._invert_import_graph(graph)
+        # b.py imported by a.py
+        assert "a.py" in inv["b.py"]
+        # c.py imported by a.py and b.py
+        assert set(inv["c.py"]) == {"a.py", "b.py"}
+        # a.py imported by no one
+        assert inv["a.py"] == []
+
+
 class TestCycle5K6FaultLocateDisplayEndToEnd:
     """Cycle 5 K-6: pin the --locate display path end-to-end on a real
     failing test scenario. Pre-K-6 fault_locate had ~100 LOC of display
