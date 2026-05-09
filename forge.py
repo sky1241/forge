@@ -1845,20 +1845,85 @@ def get_changed_files(root: Path) -> set[str]:
 
 def find_impacted_tests(root: Path, changed_files: set[str]) -> list[Path]:
     """Find tests that import or reference changed modules.
-    Inspired by pytest-testmon (Puha 2015) — dependency graph for test selection."""
-    changed_modules = set()
-    for f in changed_files:
-        # Extract module name from path
-        name = Path(f).stem
-        changed_modules.add(name)
+    Inspired by pytest-testmon (Puha 2015) — dependency graph for test selection.
 
-    impacted = []
+    Cycle 7 L-1 (B23 fix): replaces the cycle-3 substring match with proper
+    AST-based import detection. The old form `if mod in content` produced:
+      - false positives: a test mentioning `mymodule` only in a comment or
+        docstring was flagged as impacted.
+      - false negatives: `from mymodule import X as Y` followed by uses of
+        `Y(...)` left no `mymodule` token in the body of the test, so the
+        test was missed entirely.
+    Now we walk `ast.parse` looking at `Import` and `ImportFrom` nodes
+    (the only places where a module reference is unambiguous), and we
+    resolve dotted-import paths so `from mymodule.sub import X` matches
+    a change in `mymodule/sub.py` AND `mymodule/`.
+    """
+    changed_modules: set[str] = set()
+    for f in changed_files:
+        # Extract module name from path. Both the file stem
+        # (`forge.py` → `forge`) and any package prefix
+        # (`pkg/sub/file.py` → `pkg`, `pkg.sub`, `pkg.sub.file`) so a
+        # change in a deep module is detectable from any ancestor import.
+        p = Path(f)
+        if p.suffix != ".py":
+            continue
+        parts = list(p.with_suffix("").parts)
+        # Drop a leading "src" PARENT directory (common src-layout). Only
+        # strip when there's a child path — `src/foo.py` → `foo`. Pre-fix
+        # we stripped `src.py` itself to nothing, so a top-level src.py
+        # was unfindable. Keep it.
+        if len(parts) > 1 and parts[0] == "src":
+            parts = parts[1:]
+        # Drop trailing __init__ — `pkg/__init__.py` → `pkg`
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        if not parts:
+            continue
+        # Add every prefix so an `import pkg.sub` is matched by a change
+        # in `pkg/sub/leaf.py` (the dotted name is `pkg.sub.leaf`).
+        for i in range(1, len(parts) + 1):
+            changed_modules.add(".".join(parts[:i]))
+        # Also bare leaf name (most-common case): `forge.py` → `forge`
+        changed_modules.add(parts[-1])
+
+    impacted: list[Path] = []
     for test_file in find_tests(root):
-        content = test_file.read_text(encoding="utf-8", errors="replace")
-        for mod in changed_modules:
-            if mod in content:
-                impacted.append(test_file)
+        try:
+            source = test_file.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source)
+        except (OSError, SyntaxError):
+            # Unreadable / broken syntax → conservative: include in
+            # impacted set so a real test crash isn't masked.
+            impacted.append(test_file)
+            continue
+        hit = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    # `import pkg.sub` → check pkg, pkg.sub
+                    name = alias.name
+                    if name in changed_modules:
+                        hit = True
+                        break
+                    # also check every dotted prefix
+                    parts = name.split(".")
+                    if any(".".join(parts[:i]) in changed_modules
+                           for i in range(1, len(parts) + 1)):
+                        hit = True
+                        break
+            elif isinstance(node, ast.ImportFrom):
+                if node.module is None:
+                    continue
+                # `from pkg.sub import X` → check pkg, pkg.sub
+                parts = node.module.split(".")
+                if any(".".join(parts[:i]) in changed_modules
+                       for i in range(1, len(parts) + 1)):
+                    hit = True
+            if hit:
                 break
+        if hit:
+            impacted.append(test_file)
 
     return impacted
 

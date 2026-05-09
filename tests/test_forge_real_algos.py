@@ -1004,6 +1004,84 @@ class TestFaultLocateSurfacesCollectionErrors:
         )
 
 
+class TestCycle7L1FindImpactedTestsAst:
+    """Cycle 7 L-1 (B23): replace substring matching in `find_impacted_tests`
+    with proper AST-based import detection. The old `if mod in content`
+    produced false positives (comments mentioning a module name) AND false
+    negatives (aliased imports `from X import Y as Z` then `Z(...)` —
+    no `X` token in the test body)."""
+
+    def test_fast_no_false_positive_on_comment_mention(self, tmp_path):
+        """Test that mentions a module name only in a comment is NOT
+        flagged as impacted — substring matching's classic FP."""
+        _git_init(tmp_path)
+        (tmp_path / "src.py").write_text("def f(): return 1\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_unrelated.py").write_text(
+            '"""Unrelated test file. Mentions src but does not import it."""\n'
+            'def test_smoke(): assert 1 + 1 == 2\n'
+        )
+        _git_commit(tmp_path)
+        impacted = forge.find_impacted_tests(tmp_path, {"src.py"})
+        names = [p.name for p in impacted]
+        assert "test_unrelated.py" not in names, (
+            f"comment-only mention should not flag as impacted; got {names}"
+        )
+
+    def test_fast_detects_aliased_import(self, tmp_path):
+        """`from src import f as alias` is the case substring matching
+        WOULD catch (token 'src' present in source). Pin it so a future
+        refactor doesn't regress."""
+        _git_init(tmp_path)
+        (tmp_path / "src.py").write_text("def f(): return 1\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_aliased.py").write_text(
+            "from src import f as alias\n"
+            "def test_aliased(): assert alias() == 1\n"
+        )
+        _git_commit(tmp_path)
+        impacted = forge.find_impacted_tests(tmp_path, {"src.py"})
+        names = [p.name for p in impacted]
+        assert "test_aliased.py" in names, (
+            f"aliased import should be detected; got {names}"
+        )
+
+    def test_fast_detects_dotted_import_via_prefix(self, tmp_path):
+        """`from pkg.sub import X` should be detected when ANY ancestor
+        of the dotted path changes: changing `pkg/sub.py` flags the test."""
+        _git_init(tmp_path)
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "__init__.py").write_text("")
+        (tmp_path / "pkg" / "sub.py").write_text("def helper(): return 42\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_dotted.py").write_text(
+            "from pkg.sub import helper\n"
+            "def test_helper(): assert helper() == 42\n"
+        )
+        _git_commit(tmp_path)
+        impacted = forge.find_impacted_tests(tmp_path, {"pkg/sub.py"})
+        names = [p.name for p in impacted]
+        assert "test_dotted.py" in names, (
+            f"dotted import (pkg/sub.py changed) should be detected; got {names}"
+        )
+
+    def test_fast_handles_unreadable_test_conservatively(self, tmp_path):
+        """A test file with a syntax error is treated conservatively as
+        impacted — better to surface the broken test than skip silently."""
+        _git_init(tmp_path)
+        (tmp_path / "src.py").write_text("def f(): pass\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_broken.py").write_text(
+            "def test_broken(:\n"  # syntax error
+        )
+        _git_commit(tmp_path)
+        impacted = forge.find_impacted_tests(tmp_path, {"src.py"})
+        names = [p.name for p in impacted]
+        assert "test_broken.py" in names, (
+            f"unparseable test must be conservatively included; got {names}"
+        )
+
+
 class TestCycle5K6FaultLocateDisplayEndToEnd:
     """Cycle 5 K-6: pin the --locate display path end-to-end on a real
     failing test scenario. Pre-K-6 fault_locate had ~100 LOC of display
