@@ -33,9 +33,13 @@
 | Exit | clean (PASS, score ≥ 80% threshold) | crash on `mutmut results` (pony ORM TypeError) |
 
 **Honest reading** :
-- forge libcst skips by design mutants known to be invalid (return-type arrows, `*unpacking`, string-literal mutations) → 70 meaningful mutants vs 301 noisy. Cycle 4 D-3b validation: regex backend produces 23-40% syntactically-invalid mutants on real repos.
+- forge libcst skips by design mutants known to be invalid (return-type arrows, `*unpacking`, string-literal mutations) → 70 meaningful mutants vs 301 from regex-based generation. Cycle 4 D-3b validation showed regex backend produces 23-40% syntactically-invalid mutants on real repos (filelock, attrs, mistune).
 - forge 100% kill rate is suspect on its own ("are mutants too easy?") — but counter-evidence: on click/core.py below, forge survives at 78% partial, indicating the score is target-dependent, not artificially perfect.
-- mutmut 33% includes many "trivially-survived noise mutants" (e.g. `+>` from `->` arrow flip on type hints — would-be SyntaxError, counted as survivor not as invalid).
+- mutmut 33% kill rate is genuinely low — but **the cause is not verified**. Plausible hypotheses (none proven within this bench's scope) :
+  1. mutmut generates mutations that don't change runtime behavior (e.g. dead-code mutations the test path never reaches).
+  2. mutmut generates syntactically-broken mutants whose test runner exit semantics happen to be classified as "survivor" by the harness rather than "killed".
+  3. The 38-test subset (vs forge's 173) isn't enough to kill the broader mutation set.
+  We did NOT inspect individual surviving mutants in mutmut's output, so we can't single out the dominant cause. Reporting the 33% number; declining to infer the mechanism without evidence (Sky charte D9 — "we suspect but didn't verify").
 - Test set is **NOT strictly equal**: mutmut required restricting to baseline-clean test_cli.py (38 tests) because 1 test is env-specific fail; forge tolerated the baseline fail. This favors forge on the "kill rate" metric.
 
 **Winner** : forge for kill rate AND duration. Caveats above on test-set asymmetry.
@@ -48,19 +52,21 @@ Triggered by 1-line semantic edit to `httpie/cli/argparser.py` (`max_help_positi
 |---|---|---|
 | Tests selected | **1019** / 1020 | **910** / 1001 |
 | Selection time | 125s (runs the tests) | 0.5s (selection only, doesn't run them) |
-| Setup cost | None | First baseline collection: 125s (`pytest --testmon`) |
+| Setup cost | ~5s import graph build, every run, no cache | 125s once (`.testmondata` baseline collection) |
 | Precision | Lower (selects ~all transitive importers) | Higher (uses coverage data) |
 | Recall | High (graph-based, conservative) | High (coverage-based, freshness-dependent) |
 
-**Honest reading** :
-- testmon and fast-deep solve overlapping but different problems. testmon: "what's affected per coverage history" (precision). fast-deep: "what's potentially affected per import graph" (recall).
-- testmon needs a maintained `.testmondata` cache. Stale coverage → false negatives (regressions slip past). fast-deep doesn't need any cache, but selects more aggressively.
-- Apples-to-apples comparison would require: same edit, same baseline test count, both run the selected suite. Here we're comparing testmon's selection time (~0.5s) to forge's selection+execution (125s). Not directly comparable on duration.
+**Honest reading — fast-deep barely reduced anything on this trigger** :
+- 1019 / 1020 = quasi-no reduction. **Reason** : `argparser.py` is transitively imported by ~the entire httpie codebase (it's the central CLI parser). fast-deep's BFS through inverted imports correctly identifies that almost every test eventually depends on it.
+- **fast-deep's value shows on leaf-file edits**, not central files. The trigger we picked (a central file) hides fast-deep's reduction power. A leaf-file trigger (e.g. editing `httpie/output/formatters/colors.py`) would likely select 200-400 tests, not 1019.
+- This bench is **biased toward testmon** on this dimension. **Future bench cycle 9 TODO** : add a leaf-file trigger to give fast-deep a fair chance to show its reduction power.
+- testmon and fast-deep solve overlapping but different problems regardless: testmon = "what's affected per coverage history" (precision via coverage). fast-deep = "what's potentially affected per import graph" (recall via graph). testmon needs a maintained `.testmondata` cache (stale coverage → missed regressions); fast-deep needs none.
 
-**Winner** : depends on need.
-- If you have stable coverage and tolerate occasional staleness → testmon (huge speedup on subsequent runs).
-- If you want zero-setup correctness on a CI cold start → fast-deep.
-- forge wins on UX simplicity (no baseline maintenance), testmon wins on speed-when-warm.
+**Setup cost trade-off** :
+- **testmon** : big upfront (125s baseline), nearly free thereafter. Pays off if you re-run often.
+- **fast-deep** : small recurring (~5s graph build per run), no cache management. Pays off on cold-start CI.
+
+**Winner on this trigger** : testmon (910 < 1019, faster setup-free). But the trigger is biased; honest verdict pending leaf-file rerun.
 
 ### Bench 1C — `forge --modularity` vs `pydeps` on httpie
 
