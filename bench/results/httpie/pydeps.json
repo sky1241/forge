@@ -1,0 +1,9 @@
+{
+  "tool": "pydeps",
+  "version": "3.0.6",
+  "output": "JSON dep graph (modules + imports + bacon depth)",
+  "n_modules_listed": "~140",
+  "duration_seconds": 8,
+  "exit_code": 0,
+  "notes": "Different scope: graph extraction/visualization, no modularity metric. Complement to forge --modularity, not direct competitor."
+}

@@ -1,0 +1,15 @@
+{
+  "tool": "forge --mutate",
+  "version": "1.1.0",
+  "target": "httpie/cli/argparser.py",
+  "target_loc": 700,
+  "duration_seconds": 678,
+  "mutants_total": 70,
+  "mutants_killed": 70,
+  "mutants_survived": 0,
+  "mutants_timeout": 0,
+  "score_pct": 100.0,
+  "exit_code": 0,
+  "test_set": "tests/ (173 tests, 1 baseline-fail tolerated)",
+  "notes": "libcst AST-aware backend skips known-invalid mutants (return-type arrows, *unpacking) by construction"
+}

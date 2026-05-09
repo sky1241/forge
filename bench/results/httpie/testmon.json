@@ -1,0 +1,10 @@
+{
+  "tool": "pytest --testmon",
+  "version": "2.2.0",
+  "trigger": "1-line edit to httpie/cli/argparser.py (max_help_position=6 → 7)",
+  "tests_in_repo_total": 1001,
+  "tests_selected": 910,
+  "duration_seconds": 0.5,
+  "result": "910 collected, 91 deselected (skipped: known unaffected)",
+  "notes": "Coverage-aware selection. Requires .testmondata baseline (collected once: 125s on full suite). Faster than fast-deep on subsequent runs but precision depends on coverage data freshness."
+}

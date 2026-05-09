@@ -1,0 +1,16 @@
+{
+  "tool": "forge --mutate",
+  "version": "1.1.0",
+  "target": "src/click/core.py",
+  "target_loc": 3500,
+  "duration_seconds": 1800,
+  "mutants_total": 314,
+  "mutants_tested": 109,
+  "mutants_killed": 85,
+  "mutants_survived": 24,
+  "mutants_timeout": 0,
+  "score_pct_partial": 78.0,
+  "exit_code": 144,
+  "status": "TIMEOUT",
+  "notes": "Hit 30min wall-clock cap mid-run. ~109/314 mutants tested. Each mutant runs ~21 click test files (1494 tests, ~8.6s baseline) → ~16s effective per mutant including overhead. Realistic completion estimate: 50-90min."
+}

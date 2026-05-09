@@ -1,0 +1,16 @@
+{
+  "tool": "forge --modularity",
+  "version": "1.1.0",
+  "metric": "Newman-Girvan Q",
+  "Q": 0.356,
+  "verdict": "good (Q ≥ 0.30 threshold per Newman 2006)",
+  "n_files": 133,
+  "n_communities": 46,
+  "top_clusters": [
+    {"id": 20, "size": 11, "q_contribution": 0.047},
+    {"id": 12, "size": 9, "q_contribution": 0.049},
+    {"id": 31, "size": 9, "q_contribution": 0.028}
+  ],
+  "duration_seconds": 5,
+  "notes": "Single scalar architecture metric. No direct competitor produces Q."
+}

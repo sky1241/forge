@@ -1,0 +1,15 @@
+{
+  "tool": "mutmut",
+  "version": "2.5.1",
+  "target": "httpie/cli/argparser.py",
+  "target_loc": 700,
+  "duration_seconds": 960,
+  "mutants_total": 301,
+  "mutants_killed": 100,
+  "mutants_survived": 201,
+  "mutants_timeout": 0,
+  "score_pct": 33.2,
+  "exit_code": "crash on results display (pony ORM bug)",
+  "test_set": "tests/test_cli.py (38 tests, restricted to baseline-clean subset)",
+  "notes": "mutmut 3.5.0 removed --paths-to-mutate; downgraded. Required --runner explicit pointing to venv-bench python. Results count read from progress log (mutmut results CLI crashes with pony QueryResultIterator TypeError)."
+}
