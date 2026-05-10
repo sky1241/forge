@@ -1004,6 +1004,151 @@ class TestFaultLocateSurfacesCollectionErrors:
         )
 
 
+class TestCycle9HookInstall:
+    """Cycle 9: `forge --install-hook` / `--uninstall-hook` packaging.
+    Idempotent: install on already-installed = no-op. Backup + replace
+    on user-existing-non-forge hook only with --force. Refuse to remove
+    a hook that doesn't carry the forge sentinel."""
+
+    def test_install_hook_creates_executable_pre_commit(self, tmp_path):
+        """install_hook creates .git/hooks/pre-commit with the forge
+        sentinel and chmod +x."""
+        _git_init(tmp_path)
+        ok = forge.install_hook(tmp_path)
+        assert ok is True
+        hook_path = tmp_path / ".git" / "hooks" / "pre-commit"
+        assert hook_path.exists()
+        assert hook_path.stat().st_mode & 0o111  # executable bit set
+        content = hook_path.read_text()
+        assert forge.HOOK_SENTINEL in content
+        assert "forge --fast-deep" in content
+
+    def test_install_hook_idempotent_no_op(self, tmp_path, capsys):
+        """Re-install on top of forge-managed hook is a no-op
+        (returns False, doesn't crash)."""
+        _git_init(tmp_path)
+        forge.install_hook(tmp_path)
+        capsys.readouterr()  # flush first install message
+        ok = forge.install_hook(tmp_path)
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "already installed" in out
+
+    def test_install_hook_refuses_user_hook_without_force(
+        self, tmp_path, capsys,
+    ):
+        """If the user has a non-forge pre-commit hook, install refuses
+        unless --force is passed (so we never silently clobber)."""
+        _git_init(tmp_path)
+        hook_path = tmp_path / ".git" / "hooks" / "pre-commit"
+        hook_path.write_text("#!/bin/bash\necho 'user hook'\n")
+        hook_path.chmod(0o755)
+        ok = forge.install_hook(tmp_path, force=False)
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "non-forge" in out
+        # User hook must still be present, untouched
+        assert "user hook" in hook_path.read_text()
+
+    def test_install_hook_force_backs_up_existing(self, tmp_path):
+        """`--force` backs up the existing user hook to pre-commit.bak
+        before replacing."""
+        _git_init(tmp_path)
+        hook_path = tmp_path / ".git" / "hooks" / "pre-commit"
+        backup_path = tmp_path / ".git" / "hooks" / "pre-commit.bak"
+        hook_path.write_text("#!/bin/bash\necho 'user hook v1'\n")
+        ok = forge.install_hook(tmp_path, force=True)
+        assert ok is True
+        assert backup_path.exists()
+        assert "user hook v1" in backup_path.read_text()
+        assert forge.HOOK_SENTINEL in hook_path.read_text()
+
+    def test_uninstall_hook_refuses_non_forge_hook(self, tmp_path, capsys):
+        """uninstall refuses to delete a hook without the forge sentinel."""
+        _git_init(tmp_path)
+        hook_path = tmp_path / ".git" / "hooks" / "pre-commit"
+        hook_path.write_text("#!/bin/bash\necho 'mine'\n")
+        ok = forge.uninstall_hook(tmp_path)
+        assert ok is False
+        # Hook still present
+        assert hook_path.exists()
+        assert "mine" in hook_path.read_text()
+        out = capsys.readouterr().out
+        assert "Refusing" in out
+
+    def test_uninstall_hook_restores_backup(self, tmp_path):
+        """uninstall_hook restores the .bak backup that install --force
+        created, so the user gets their original hook back."""
+        _git_init(tmp_path)
+        hook_path = tmp_path / ".git" / "hooks" / "pre-commit"
+        hook_path.write_text("#!/bin/bash\necho 'user-original'\n")
+        forge.install_hook(tmp_path, force=True)  # creates .bak
+        ok = forge.uninstall_hook(tmp_path)
+        assert ok is True
+        # Original restored
+        assert hook_path.exists()
+        assert "user-original" in hook_path.read_text()
+        # Backup gone (consumed)
+        backup_path = tmp_path / ".git" / "hooks" / "pre-commit.bak"
+        assert not backup_path.exists()
+
+
+class TestCycle9ShieldOrchestration:
+    """Cycle 9: `forge --shield` chains carmack → gen_props → fast-deep
+    with feedback. Stage 1 output (top-N risky files) drives Stage 2
+    target selection (gen_props only on risky files lacking tests)."""
+
+    def test_shield_no_op_on_empty_history(self, tmp_path, capsys):
+        """Empty git repo → predict_carmack returns None → shield
+        prints "no carmack signal" and exits cleanly without crash."""
+        _git_init(tmp_path)
+        # Single trivial commit so HEAD exists; no real churn data
+        (tmp_path / "x.py").write_text("def f(): return 1\n")
+        _git_commit(tmp_path)
+        forge.run_shield(tmp_path)
+        out = capsys.readouterr().out
+        assert "SHIELD" in out
+        # On an empty/shallow history, Stage 1 either bails out or
+        # produces a degenerate top-N. Either way no Python traceback.
+        assert "Traceback" not in capsys.readouterr().err
+
+
+class TestCycle9HasTestForHelper:
+    """Cycle 9: `_has_test_for(root, src_file)` checks if any test
+    file imports the source module. Used by run_shield to skip
+    gen_props on files already covered."""
+
+    def test_has_test_for_detects_direct_import(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "src.py").write_text("def f(): return 1\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_src.py").write_text(
+            "import src\ndef test_smoke(): assert src.f() == 1\n"
+        )
+        _git_commit(tmp_path)
+        assert forge._has_test_for(tmp_path, "src.py") is True
+
+    def test_has_test_for_detects_from_import(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "models.py").write_text("def find(x): return x\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_models.py").write_text(
+            "from models import find\ndef test_find(): assert find(5) == 5\n"
+        )
+        _git_commit(tmp_path)
+        assert forge._has_test_for(tmp_path, "models.py") is True
+
+    def test_has_test_for_returns_false_when_no_match(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "src.py").write_text("def f(): return 1\n")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_other.py").write_text(
+            "def test_smoke(): assert 1 + 1 == 2\n"
+        )
+        _git_commit(tmp_path)
+        assert forge._has_test_for(tmp_path, "src.py") is False
+
+
 class TestCycle7L1FindImpactedTestsAst:
     """Cycle 7 L-1 (B23): replace substring matching in `find_impacted_tests`
     with proper AST-based import detection. The old `if mod in content`

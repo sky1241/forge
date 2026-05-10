@@ -784,6 +784,122 @@ def print_modularity_report(root: Path) -> None:
     print(f"{bar}\n")
 
 
+# === SHIELD — orchestrator with feedback chains (cycle 9 L-2) ===
+#
+# forge has ~25 sub-commands; pre-cycle 9 they were islands. Each
+# computed its own metric in isolation. `--full-cycle` was a linear
+# pipeline (predict → mutate → gen-props → test → flaky → locate)
+# but no output was injected as input of the next stage.
+#
+# `--shield` is the missing orchestration layer: outputs flow as
+# inputs through the chain.
+#
+#   STAGE 1 — predict_carmack   → top-N risky files
+#   STAGE 2 — gen_props          ← driven by Stage 1's risky set,
+#                                   runs ONLY on files that lack a
+#                                   matching test (per AST imports)
+#   STAGE 3 — fast_deep          → run impacted tests
+#
+# This is the minimum viable cycle 9: Stage 1 → Stage 2 is one real
+# feedback edge (carmack output drives gen_props target selection).
+# Cycle 10 candidate: Stage 4 = fault_locate → focused mutation on
+# the suspect lines from Stage 3 failures (requires refactor of
+# fault_locate to return a structured top-N list — deferred).
+
+
+def _has_test_for(root: Path, src_file: str) -> bool:
+    """Cycle 9: does any test file import this source module?
+    Used by run_shield to skip gen_props on files already covered.
+    AST-based per cycle 7 L-1 lesson — no substring matching."""
+    p = Path(src_file)
+    if p.suffix != ".py":
+        return False
+    src_module = p.stem
+    if src_module == "__init__":
+        return False
+    for tf in find_tests(root):
+        try:
+            content = tf.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(content)
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.name
+                    if name == src_module or name.endswith(f".{src_module}"):
+                        return True
+            elif isinstance(node, ast.ImportFrom):
+                if node.module is not None:
+                    if (node.module == src_module
+                            or node.module.endswith(f".{src_module}")):
+                        return True
+    return False
+
+
+def run_shield(root: Path, *, top_n: int = 3) -> None:
+    """Cycle 9 orchestrator with feedback chains.
+
+    Stage 1 → 2 → 3 with Stage 1 output driving Stage 2 target.
+    Prints a structured shield report. Read-only on the existing
+    sub-commands (no behavior change to predict_carmack /
+    gen_props / run_fast_deep individually)."""
+    bar = "=" * 50
+    print(f"\n{bar}")
+    print(f"  SHIELD — orchestrated forge feedback chain")
+    print(f"{bar}")
+
+    # Stage 1: carmack risk ranking
+    print(f"  [STAGE 1] predict_carmack — identify top-{top_n} risky files")
+    risky = predict_carmack(root, weeks=4)
+    if risky is None or not risky:
+        print(f"    (no carmack signal — empty/shallow git history?)")
+        print(f"{bar}\n")
+        return
+    top_files = risky[:top_n]
+    for r in top_files:
+        score = r.get("carmack_score", r.get("score", 0.0))
+        print(f"    {r['file']:50}  score={score:.3f}")
+
+    # Stage 2: gen_props on risky files lacking tests
+    print(f"\n  [STAGE 2] gen-props on risky files lacking matching tests")
+    generated = 0
+    skipped_existing = 0
+    skipped_test_file = 0
+    for r in top_files:
+        f = r["file"]
+        # Skip test files — gen_props on a `test_*.py` is nonsense
+        # (test files don't have public functions to derive properties
+        # from). carmack ranks by churn, so test files with high
+        # modification activity can land in the top-N.
+        fname = Path(f).name
+        if fname.startswith("test_") or fname.endswith("_test.py"):
+            print(f"    [skip] {f} (is a test file)")
+            skipped_test_file += 1
+            continue
+        if _has_test_for(root, f):
+            print(f"    [skip] {f} (test exists)")
+            skipped_existing += 1
+            continue
+        # gen_props skips destructive functions by default (cycle 4 P7)
+        try:
+            print(f"    [gen]  {f}")
+            gen_props(root, f)
+            generated += 1
+        except Exception as e:
+            print(f"    [error] {f}: {type(e).__name__}: {e}")
+
+    # Stage 3: fast-deep impact run
+    print(f"\n  [STAGE 3] fast-deep impact selection + run")
+    run_fast_deep(root, verbose=False)
+
+    print(f"{bar}")
+    print(f"  SHIELD complete — {generated} tests generated, "
+          f"{skipped_existing} skipped (already covered), "
+          f"{skipped_test_file} skipped (test files)")
+    print(f"{bar}\n")
+
+
 def _check_dep(name: str, pip_name: str | None = None) -> Any:
     """Try to import optional dependency, return module or None."""
     try:
@@ -1476,6 +1592,103 @@ def init_repo(root: Path) -> None:
         print(f"  Created tests/")
 
     print(f"  Forge initialized in {root.name}")
+
+
+# Cycle 9 L-1: git pre-commit hook installer. The hook calls
+# `forge --fast-deep` so a developer's commit is gated on the
+# transitive-impact subset of the suite. A 1-line entry-point in the
+# user's `.git/hooks/pre-commit` removes the adoption barrier
+# ("how do I wire forge into git?" — this script wires it).
+HOOK_FILENAME = "pre-commit"
+HOOK_SENTINEL = "# forge-shield managed pre-commit hook"
+HOOK_TEMPLATE = """#!/bin/bash
+{sentinel}
+# Generated by `forge --install-hook`. Remove with `forge --uninstall-hook`,
+# or edit freely — the uninstall command checks for the sentinel above
+# and will refuse to remove a manually-edited hook.
+#
+# Default behavior: run forge --fast-deep on the staged changes.
+# fast-deep selects all transitively-impacted tests via the inverted
+# import graph (cycle 7 L-2). Override the command below to taste.
+set -e
+exec forge --fast-deep
+"""
+
+
+def install_hook(root: Path, *, force: bool = False) -> bool:
+    """Cycle 9: install a forge-managed git pre-commit hook.
+
+    Idempotent: if the hook already exists with the forge sentinel,
+    no-op (return False). If the hook exists without the sentinel,
+    refuse and ask the user to confirm with `--force` (which backs
+    up the existing hook to `.git/hooks/pre-commit.bak`).
+
+    Returns True if the hook was newly installed (or replaced via
+    --force), False if it already had the forge sentinel.
+    """
+    git_hooks = root / ".git" / "hooks"
+    if not git_hooks.is_dir():
+        print(f"  ERROR: {git_hooks} doesn't exist — is this a git repo?")
+        return False
+    hook_path = git_hooks / HOOK_FILENAME
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8", errors="replace")
+        if HOOK_SENTINEL in existing:
+            print(f"  forge hook already installed at {_safe_path(hook_path)}")
+            return False
+        if not force:
+            print(f"  ERROR: a non-forge {HOOK_FILENAME} hook already exists at "
+                  f"{_safe_path(hook_path)}.")
+            print(f"  Re-run with `forge --install-hook --force` to back it up to "
+                  f"{HOOK_FILENAME}.bak and replace.")
+            return False
+        # Backup
+        backup = git_hooks / f"{HOOK_FILENAME}.bak"
+        backup.write_text(existing, encoding="utf-8")
+        print(f"  Backed up existing hook to {_safe_path(backup)}")
+    hook_path.write_text(
+        HOOK_TEMPLATE.format(sentinel=HOOK_SENTINEL),
+        encoding="utf-8",
+    )
+    hook_path.chmod(0o755)
+    print(f"  Installed forge pre-commit hook at {_safe_path(hook_path)}")
+    print(f"  Hook will run: forge --fast-deep")
+    return True
+
+
+def uninstall_hook(root: Path) -> bool:
+    """Cycle 9: remove a forge-managed git pre-commit hook.
+
+    Refuses to remove a hook that doesn't have the forge sentinel
+    (i.e. was edited / replaced by the user) — better to ask the
+    user than to clobber their work.
+
+    Returns True if the hook was removed, False if no forge hook
+    found OR if a non-forge hook was found and left in place.
+    """
+    git_hooks = root / ".git" / "hooks"
+    hook_path = git_hooks / HOOK_FILENAME
+    if not hook_path.exists():
+        print(f"  No {HOOK_FILENAME} hook found at {_safe_path(hook_path)}")
+        return False
+    existing = hook_path.read_text(encoding="utf-8", errors="replace")
+    if HOOK_SENTINEL not in existing:
+        print(f"  ERROR: {_safe_path(hook_path)} doesn't carry the forge "
+              f"sentinel comment.")
+        print(f"  This hook was either hand-edited or installed by another "
+              f"tool. Refusing to remove. Edit / delete manually if intended.")
+        return False
+    hook_path.unlink()
+    print(f"  Removed forge pre-commit hook from {_safe_path(hook_path)}")
+    # Restore backup if we made one during install
+    backup = git_hooks / f"{HOOK_FILENAME}.bak"
+    if backup.exists():
+        existing_backup = backup.read_text(encoding="utf-8", errors="replace")
+        hook_path.write_text(existing_backup, encoding="utf-8")
+        hook_path.chmod(0o755)
+        backup.unlink()
+        print(f"  Restored previous hook from {_safe_path(backup)}")
+    return True
 
 
 def add_bug(root: Path, description: str) -> str:
@@ -4194,6 +4407,9 @@ ANALYTICS
   forge --heatmap                  show per-file failure heatmap
   forge --locate                   Ochiai SBFL fault localization (needs coverage.py)
   forge --modularity               Newman-Girvan Q over the import graph
+  forge --shield                   orchestrate carmack→gen-props→fast-deep with feedback (cycle 9)
+  forge --install-hook             install git pre-commit hook (runs forge --fast-deep)
+  forge --uninstall-hook           remove forge-managed git pre-commit hook
 
 FLAKY / BISECT
   forge --flaky [N]                re-run failing tests N times to classify flaky
@@ -4233,6 +4449,7 @@ KNOWN_FLAGS = {
     # boolean / action flags (no value, or value provided as next non-flag arg)
     "--help", "--version", "--baseline", "--init", "--fast", "--fast-deep", "--watch", "--full-cycle",
     "--carmack", "--anomaly", "--heatmap", "--locate", "--predict", "--modularity",
+    "--shield", "--install-hook", "--uninstall-hook", "--force",
     "--snapshot-check", "--diff", "--verbose", "--include-destructive",
     "--incremental-mutate",
     # flags that take a value
@@ -4596,6 +4813,19 @@ def main() -> None:
     if "--modularity" in args:
         print_modularity_report(root)
         return
+
+    if "--shield" in args:
+        run_shield(root)
+        return
+
+    if "--install-hook" in args:
+        force = "--force" in args
+        ok = install_hook(root, force=force)
+        sys.exit(0 if ok else 1)
+
+    if "--uninstall-hook" in args:
+        ok = uninstall_hook(root)
+        sys.exit(0 if ok else 1)
 
     if "--watch" in args:
         print("  Watching for changes... (Ctrl+C to stop)")
