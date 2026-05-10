@@ -1010,15 +1010,36 @@ class TestCycle9HookInstall:
     on user-existing-non-forge hook only with --force. Refuse to remove
     a hook that doesn't carry the forge sentinel."""
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX exec bit not meaningful on Windows (NTFS doesn't carry "
+               "executable permission). Hook content + sentinel are still "
+               "verified by the other tests; chmod 0o755 in install_hook is "
+               "a no-op on Windows but harmless.",
+    )
     def test_install_hook_creates_executable_pre_commit(self, tmp_path):
         """install_hook creates .git/hooks/pre-commit with the forge
-        sentinel and chmod +x."""
+        sentinel and chmod +x. POSIX-only; see skipif above."""
         _git_init(tmp_path)
         ok = forge.install_hook(tmp_path)
         assert ok is True
         hook_path = tmp_path / ".git" / "hooks" / "pre-commit"
         assert hook_path.exists()
         assert hook_path.stat().st_mode & 0o111  # executable bit set
+        content = hook_path.read_text()
+        assert forge.HOOK_SENTINEL in content
+        assert "forge --fast-deep" in content
+
+    def test_install_hook_content_cross_platform(self, tmp_path):
+        """Hook content + sentinel verified on every platform (Windows
+        included). The exec-bit specific check is in the POSIX-only
+        test above. This one ensures the hook FILE is created with the
+        right text — the platform-portable contract."""
+        _git_init(tmp_path)
+        ok = forge.install_hook(tmp_path)
+        assert ok is True
+        hook_path = tmp_path / ".git" / "hooks" / "pre-commit"
+        assert hook_path.exists()
         content = hook_path.read_text()
         assert forge.HOOK_SENTINEL in content
         assert "forge --fast-deep" in content
