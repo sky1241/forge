@@ -8,6 +8,26 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.2.1] - 2026-05-10
+
+Patch release. End-to-end runtime test of the v1.2.0 hook caught a
+**production bug** that the unit-level regression tests had missed:
+the hook was unusable on any real install.
+
+### Fixed
+- **`forge --install-hook` now embeds `sys.executable`** and invokes
+  `python -m forge` instead of bare `forge`. Pre-1.2.1, the hook
+  was `exec forge --fast-deep`. Git invokes pre-commit hooks with
+  a stripped PATH that doesn't include the user's venv — so the
+  hook crashed with `forge: not found` on every real commit. Caught
+  on cycle 9 follow-up by an end-to-end runtime test (cycle 9 unit
+  tests covered install/uninstall paths but never actually triggered
+  the hook via `git commit`). Sky's RULE 4 lesson re-applied:
+  unit-tests-pass ≠ end-to-end works.
+- **New regression test** `test_install_hook_embeds_sys_executable`
+  pins both the absolute python path embed AND the `python -m forge`
+  invocation form (not bare `forge`).
+
 ## [1.2.0] - 2026-05-10
 
 Minor release. Closes the orchestration gap between forge's ~25
@@ -397,7 +417,8 @@ mypy `--strict` passes the entire codebase.
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/sky1241/forge/releases/tag/v1.2.1
 [1.2.0]: https://github.com/sky1241/forge/releases/tag/v1.2.0
 [1.1.1]: https://github.com/sky1241/forge/releases/tag/v1.1.1
 [1.1.0]: https://github.com/sky1241/forge/releases/tag/v1.1.0

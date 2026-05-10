@@ -1042,7 +1042,30 @@ class TestCycle9HookInstall:
         assert hook_path.exists()
         content = hook_path.read_text()
         assert forge.HOOK_SENTINEL in content
-        assert "forge --fast-deep" in content
+        assert "-m forge --fast-deep" in content
+
+    def test_install_hook_embeds_sys_executable(self, tmp_path):
+        """End-to-end-runtime caught (cycle 9 follow-up): git invokes
+        pre-commit hooks with a stripped PATH that doesn't include the
+        user's venv. The original `exec forge --fast-deep` failed in
+        production with "forge: not found". Fix: embed `sys.executable`
+        captured at install time and use `python -m forge`. Pin both
+        sides of the contract :
+          1. the absolute python path is in the hook
+          2. the invocation form is `<python> -m forge ...` (not bare `forge`)
+        """
+        import sys as _sys
+        _git_init(tmp_path)
+        ok = forge.install_hook(tmp_path)
+        assert ok is True
+        content = (tmp_path / ".git" / "hooks" / "pre-commit").read_text()
+        assert _sys.executable in content, (
+            f"hook must embed sys.executable={_sys.executable!r} so git's "
+            f"stripped PATH doesn't break the invocation; got:\n{content}"
+        )
+        # `exec` line must invoke via -m forge, not bare `forge`
+        assert "-m forge" in content
+        assert "exec forge " not in content
 
     def test_install_hook_idempotent_no_op(self, tmp_path, capsys):
         """Re-install on top of forge-managed hook is a no-op
