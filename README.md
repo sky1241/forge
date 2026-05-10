@@ -26,6 +26,38 @@ forge --shield   # orchestrate: predict → gen tests → run impacted
 
 See [BENCHMARK.md](BENCHMARK.md) for the 6 frictions admitted (test set asymmetry, mutmut crash, black skipped per timeout cap).
 
+## Honest Limits — cycle 11 case studies v2 (2026-05-11)
+
+`forge --carmack` was tested on real Python bugs from BugsInPy +
+GitHub fallback (stratified small + medium + large, pre-registered
+seeds 42/43, 400 candidates exhaustively filtered), see
+[forge-case-studies](https://github.com/sky1241/forge-case-studies).
+
+Verdict (pre-registered, N=15 effective): **1/3 criteria OUI**.
+
+- **C2 OUI**: precision@10 = 0.625 (5/8 train, 4/7 holdout),
+  Wilson 95% CI lower bound 0.306 ≥ 0.30 threshold.
+- **C1 NON**: Fisher exact p=0.31 (forge 5/8 vs random 2/8 top10).
+  Signal exists but N=8 underpowered.
+- **C3 NON**: learned calibration delta AUC on holdout = +0.0095
+  (below 0.05 threshold). Better than v1 (-0.054 was overfit),
+  but not enough to replace heuristic.
+
+**Default heuristic weights remain unchanged**: (0.20 kalman,
+0.15 wavelet, 0.25 crash, 0.15 coupling, 0.25 churn). Calibration
+suggests crash+kalman dominate (sum 85%) but signal too weak on
+N=8 train to commit.
+
+**Unexpected finding**: `forge --predict` (churn-only) beats
+`forge --carmack` (multi-signal) 6/8 top10 vs 5/8 on train.
+Multi-signal aggregation may dilute pure churn predictor on this
+panel. Under investigation cycle 12.
+
+See [forge-case-studies/FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md)
+for the full methodology, 10 frictions admitted, and per-case ranks.
+
+**Reproducibility**: `git clone forge-case-studies && bash run_all.sh`
+
 ## What's new (cycle 4)
 
 - **`mypy --strict`** passes the entire codebase (`tests/test_typing.py` enforces).
