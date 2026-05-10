@@ -8,6 +8,31 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.2.2] - 2026-05-10
+
+Patch release. End-to-end test pass over all 30 sub-commands caught
+**a second production bug** (after the v1.2.1 hook fix): `find_tests`
+didn't exclude virtualenv directories.
+
+### Fixed
+- **`find_tests` excludes `.venv`/`venv`/`env`/`.tox`/`.eggs`/
+  `build`/`.mypy_cache`/`.pytest_cache`** — caught running
+  `forge --locate` on the forge repo itself: pytest crashed at
+  collection on `.venv/lib/python3.13/site-packages/libcst/tests/
+  test_fuzz.py` (third-party test, not for the host harness).
+  Pre-1.2.2 only the legacy set [`.forge`, `__pycache__`, `.git`,
+  `node_modules`] was excluded.
+- **Match exclusions as `/{dir}/` segments**, not bare-name
+  substrings. Caught self-inflicted false-positive mid-fix:
+  bare `"build"` substring matched FILE names like
+  `build_tests.py` (a legitimate test file naming convention,
+  cycle 2 cousin pc1 finding from mkdocs). Now uses the
+  `/{dir}/` pattern same as `/bench/` exclusions, which only
+  matches an exact directory segment in the path.
+- **3 regression tests** in `TestCycle10VenvExclusion`:
+  `.venv` excluded, `venv` (no dot) excluded, `.tox` /
+  `.mypy_cache` / `.pytest_cache` excluded.
+
 ## [1.2.1] - 2026-05-10
 
 Patch release. End-to-end runtime test of the v1.2.0 hook caught a
@@ -417,7 +442,8 @@ mypy `--strict` passes the entire codebase.
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/sky1241/forge/releases/tag/v1.2.2
 [1.2.1]: https://github.com/sky1241/forge/releases/tag/v1.2.1
 [1.2.0]: https://github.com/sky1241/forge/releases/tag/v1.2.0
 [1.1.1]: https://github.com/sky1241/forge/releases/tag/v1.1.1

@@ -1162,6 +1162,18 @@ def find_tests(root: Path) -> list[Path]:
         for pattern in glob_patterns:
             tests.extend(groot.glob(pattern))
     excludes = [".forge", "__pycache__", ".git", "node_modules"]
+    # Cycle 10: virtualenv / cache directories must be excluded. Caught by
+    # an end-to-end --locate runtime test on the forge repo itself: pytest
+    # hit `.venv/lib/python3.13/site-packages/libcst/tests/test_fuzz.py`
+    # at collection time and crashed.
+    # IMPORTANT: dir names like "build" or "env" can also appear inside
+    # FILE names (e.g. `build_tests.py`, `bench/test_envvar.py`). Match
+    # them as `/{dir}/` segments only, not as substrings, so we don't
+    # accidentally exclude user files. Same recipe as cycle 4 J-2 for
+    # /bench/ /benchmarks/ — and same lesson re-learned.
+    for venv_dir in (".venv", "venv", "env", ".tox", ".eggs", "build",
+                     ".mypy_cache", ".pytest_cache"):
+        excludes.append(f"/{venv_dir}/")
     # Honor pyproject.toml's [tool.pytest.ini_options] norecursedirs. Found
     # this on cycle 2 with pytest's own repo: testing/example_scripts/ are
     # excluded by pytest config but forge picked them up → pytest then

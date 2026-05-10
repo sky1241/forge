@@ -1004,6 +1004,75 @@ class TestFaultLocateSurfacesCollectionErrors:
         )
 
 
+class TestCycle10VenvExclusion:
+    """Cycle 10 (E2E follow-up): `find_tests` must skip virtualenv
+    directories. Caught by an end-to-end --locate runtime test on
+    the forge repo itself — pytest crashed at collection on
+    `.venv/lib/python3.13/site-packages/libcst/tests/test_fuzz.py`
+    because that test wasn't meant for the host's pytest harness.
+
+    Pre-cycle 10 the excludes list was just
+    [.forge, __pycache__, .git, node_modules]. Now it includes
+    [.venv, venv, env, .tox, .eggs, build, .mypy_cache,
+     .pytest_cache] — the standard set of dirs any sane pytest
+    invocation skips."""
+
+    def test_find_tests_excludes_dot_venv(self, tmp_path):
+        """A test in `.venv/...` must not be collected."""
+        _git_init(tmp_path)
+        # Real test in tests/
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_real.py").write_text(
+            "def test_a(): pass\n"
+        )
+        # Decoy test inside .venv/lib/site-packages/foo/tests/
+        decoy_dir = tmp_path / ".venv" / "lib" / "site-packages" / "foo" / "tests"
+        decoy_dir.mkdir(parents=True)
+        (decoy_dir / "test_decoy.py").write_text(
+            "def test_decoy_should_not_be_collected(): pass\n"
+        )
+        _git_commit(tmp_path)
+        files = forge.find_tests(tmp_path)
+        names = [f.as_posix() for f in files]
+        assert any("tests/test_real.py" in n for n in names)
+        assert not any(".venv" in n for n in names), (
+            f".venv test must be excluded; got {names}"
+        )
+
+    def test_find_tests_excludes_venv_no_dot(self, tmp_path):
+        """`venv/` (without leading dot) is also a common name for
+        a virtualenv dir — must also be excluded."""
+        _git_init(tmp_path)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_real.py").write_text("def test_a(): pass\n")
+        venv_dir = tmp_path / "venv" / "lib" / "site-packages" / "foo"
+        venv_dir.mkdir(parents=True)
+        (venv_dir / "test_decoy.py").write_text("def test_decoy(): pass\n")
+        _git_commit(tmp_path)
+        files = forge.find_tests(tmp_path)
+        names = [f.as_posix() for f in files]
+        assert not any("venv/lib/site-packages" in n for n in names)
+
+    def test_find_tests_excludes_tox_and_caches(self, tmp_path):
+        """`.tox/`, `.mypy_cache/`, `.pytest_cache/` get accidental
+        test_*.py files (e.g. when running tools that copy sources)
+        — must be excluded."""
+        _git_init(tmp_path)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_real.py").write_text("def test_a(): pass\n")
+        for d in (".tox", ".mypy_cache", ".pytest_cache"):
+            decoy = tmp_path / d / "py3" / "tests"
+            decoy.mkdir(parents=True)
+            (decoy / "test_decoy.py").write_text("def test_d(): pass\n")
+        _git_commit(tmp_path)
+        files = forge.find_tests(tmp_path)
+        names = [f.as_posix() for f in files]
+        for d in (".tox", ".mypy_cache", ".pytest_cache"):
+            assert not any(f"/{d}/" in n for n in names), (
+                f"{d} test must be excluded; got {names}"
+            )
+
+
 class TestCycle9HookInstall:
     """Cycle 9: `forge --install-hook` / `--uninstall-hook` packaging.
     Idempotent: install on already-installed = no-op. Backup + replace
