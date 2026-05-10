@@ -8,6 +8,34 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.2.0] - 2026-05-10
+
+Minor release. Closes the orchestration gap between forge's ~25
+sub-commands. Pre-cycle 9, each sub-command was an island. Now
+`forge --shield` chains them with a feedback edge (Stage 1 carmack
+output drives Stage 2 gen_props target selection). Also adds a
+git pre-commit hook installer to remove the adoption barrier.
+
+### Added
+- **`forge --shield`** — orchestrator with feedback chain. Stage 1:
+  `predict_carmack` → top-3 risky files. Stage 2: `gen_props` on
+  risky files lacking tests (skip test_*.py files; cycle 9 caught
+  carmack ranking by churn → test files ranking high → gen_props
+  on a test file is nonsense — filtered). Stage 3: `fast_deep` →
+  run impacted tests. (cycle 9 L-2)
+- **`forge --install-hook`** — install a forge-managed git
+  pre-commit hook at `.git/hooks/pre-commit`. Idempotent (re-install
+  on top of forge hook is no-op). Refuses to clobber a non-forge
+  hook unless `--force` (which backs up to `pre-commit.bak`).
+  (cycle 9 L-1)
+- **`forge --uninstall-hook`** — remove a forge-managed pre-commit
+  hook. Refuses to delete a hook without the forge sentinel comment
+  (won't clobber hand-edited hooks). Auto-restores `pre-commit.bak`
+  if one exists.
+- **`_has_test_for(root, src_file)`** — AST-based check of whether
+  any test file imports a source module. Cycle 7 L-1 lesson applied:
+  no substring matching, walks `Import` and `ImportFrom` nodes only.
+
 ## [1.1.0] - 2026-05-09
 
 Minor release. Adds `forge --fast-deep` for transitive impact-based
@@ -369,7 +397,9 @@ mypy `--strict` passes the entire codebase.
 - **Cycle 1** — initial `forge` extraction from MUNINN-internal tooling.
   See git history `34f53ca` ↔ `bf44660` (2026-05-07).
 
-[Unreleased]: https://github.com/sky1241/forge/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/sky1241/forge/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/sky1241/forge/releases/tag/v1.2.0
+[1.1.1]: https://github.com/sky1241/forge/releases/tag/v1.1.1
 [1.1.0]: https://github.com/sky1241/forge/releases/tag/v1.1.0
 [1.0.4]: https://github.com/sky1241/forge/releases/tag/v1.0.4
 [1.0.3]: https://github.com/sky1241/forge/releases/tag/v1.0.3
