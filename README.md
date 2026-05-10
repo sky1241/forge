@@ -9,11 +9,22 @@ Pytest regression shield with predictive analytics for Python repos. Single-file
 
 ```bash
 pip install forge-shield
-forge --init    # scaffold .forge/ and BUGS.md
+forge --init     # scaffold .forge/ and BUGS.md
 forge --baseline # snapshot current test suite
-forge           # detect regressions vs baseline
-forge --carmack # rank files by predicted defect risk
+forge            # detect regressions vs baseline
+forge --carmack  # rank files by predicted defect risk
+forge --shield   # orchestrate: predict → gen tests → run impacted
 ```
+
+## How it compares to industry tools (cycle 8 bench, see [BENCHMARK.md](BENCHMARK.md))
+
+| Job | forge | Industry tool | Result |
+|---|---|---|---|
+| Mutation testing — `httpie/cli/argparser.py` | `--mutate` (libcst, 70 mutants) | `mutmut` (regex, 301 mutants) | **forge 100% kill in 11min** vs mutmut 33% in 16min |
+| Test impact selection on import-graph change | `--fast-deep` (Bazel-style transitive) | `pytest --testmon` (coverage-based) | testmon wins warm; **fast-deep wins cold-start CI** (no `.testmondata` to maintain) |
+| Architecture quality metric | `--modularity` (Newman-Girvan Q) | `pydeps` (graph extraction) | **forge unique** — pydeps has no Q metric |
+
+See [BENCHMARK.md](BENCHMARK.md) for the 6 frictions admitted (test set asymmetry, mutmut crash, black skipped per timeout cap).
 
 ## What's new (cycle 4)
 

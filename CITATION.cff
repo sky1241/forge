@@ -1,0 +1,82 @@
+cff-version: 1.2.0
+title: "forge-shield: pytest regression shield with predictive analytics"
+message: "If you use forge-shield in academic work, please cite this entry."
+type: software
+authors:
+  - given-names: "Sky"
+    alias: sky1241
+    affiliation: "independent"
+repository-code: "https://github.com/sky1241/forge"
+url: "https://github.com/sky1241/forge"
+license: MIT
+version: 1.2.2
+date-released: "2026-05-10"
+keywords:
+  - pytest
+  - mutation-testing
+  - fault-localization
+  - defect-prediction
+  - regression-shield
+  - kalman-filter
+  - kaplan-meier
+  - newman-modularity
+  - libcst
+references:
+  - type: article
+    authors:
+      - family-names: Newman
+        given-names: M. E. J.
+      - family-names: Girvan
+        given-names: M.
+    title: "Finding and evaluating community structure in networks"
+    journal: "Physical Review E"
+    year: 2004
+    volume: 69
+    number: 2
+    notes: "Q-modularity formula used by forge --modularity / --carmack"
+  - type: article
+    authors:
+      - family-names: Blondel
+        given-names: Vincent D.
+    title: "Fast unfolding of communities in large networks"
+    journal: "Journal of Statistical Mechanics"
+    year: 2008
+    notes: "Louvain clustering used by forge for import-graph community detection"
+  - type: article
+    authors:
+      - family-names: Kaplan
+        given-names: E. L.
+      - family-names: Meier
+        given-names: P.
+    title: "Nonparametric estimation from incomplete observations"
+    journal: "Journal of the American Statistical Association"
+    year: 1958
+    notes: "Survival analysis used by forge --carmack for defect-introduction prediction"
+  - type: conference-paper
+    authors:
+      - family-names: Abreu
+        given-names: Rui
+      - family-names: Zoeteweij
+        given-names: Peter
+      - family-names: van Gemund
+        given-names: Arjan J. C.
+    title: "On the Accuracy of Spectrum-based Fault Localization"
+    year: 2007
+    notes: "Ochiai SBFL used by forge --locate"
+  - type: conference-paper
+    authors:
+      - family-names: Offutt
+        given-names: A. Jefferson
+    title: "A Practical System for Mutation Testing"
+    year: 1996
+    notes: "5 mutation operators (AOR, ROR, LCR, UOI, SDL) used by forge --mutate"
+  - type: article
+    authors:
+      - family-names: Zeller
+        given-names: Andreas
+      - family-names: Hildebrandt
+        given-names: Ralf
+    title: "Simplifying and Isolating Failure-Inducing Input"
+    journal: "IEEE Transactions on Software Engineering"
+    year: 2002
+    notes: "ddmin algorithm used by forge --minimize"
