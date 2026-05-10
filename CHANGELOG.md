@@ -8,6 +8,37 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.2.3] - 2026-05-11
+
+Doc-only patch. Adds **"Honest Limits"** section to README with
+cycle 11 v2 case-study verdict on `forge --carmack`. v2 supersedes
+cycle 11 v1 INVALID (process bâclage, see [forge-case-studies REVERT commit](https://github.com/sky1241/forge-case-studies/commit/0b55e2a)).
+
+### Added
+- README "Honest Limits" v2 section with chiffres pre-registered:
+  - N=15 effective (8 train + 7 holdout), 400 candidates exhaustively filtered
+  - **C2 OUI** ✓ : precision@10 = 0.625, Wilson 95% CI lower 0.306 ≥ 0.30
+  - C1 NON : Fisher p=0.31 (forge 5-vs-2 random, N=8 underpowered)
+  - C3 NON : delta AUC holdout +0.0095 (below +0.05, but NOT overfitting
+    like v1's -0.054)
+- Unexpected finding documented: `forge --predict` (churn-only) beats
+  `forge --carmack` (multi-signal) 6/8 vs 5/8 top10 on train. Multi-signal
+  aggregation may dilute pure churn signal. Under investigation cycle 12.
+
+### Unchanged (intentional)
+- **Default heuristic weights unchanged**: `(kalman, wavelet, crash,
+  coupling, churn) = (0.20, 0.15, 0.25, 0.15, 0.25)`. Calibration grid
+  search on N=8 train suggests crash+kalman dominate (sum 0.85) but
+  signal too weak on N=8 to commit (delta AUC holdout below threshold).
+- No code change in `forge.py`. Pure doc patch. Cycle 12 (N≥50) will
+  re-test for definitive verdict.
+
+### Internal
+- Charter D9 (admit losses): cycle 11 v2 verdict `signal_faible_non_concluant`
+  (1/3 OUI) reported transparently. The signal_faible classification
+  per pre-registered decision matrix (in forge-case-studies/criteria.md)
+  triggers "garder outil + heuristic + doc" — exactly this patch.
+
 ## [1.2.2] - 2026-05-10
 
 Patch release. End-to-end test pass over all 30 sub-commands caught
