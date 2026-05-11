@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forge-shield"
-version = "1.3.0rc1"
+version = "1.3.0rc2"
 description = "Pytest regression shield with predictive analytics — Louvain communities, Kaplan-Meier survival, adaptive Kalman over git history"
 readme = "README.md"
 requires-python = ">=3.11"
