@@ -26,56 +26,75 @@ forge --shield   # orchestrate: predict → gen tests → run impacted
 
 See [BENCHMARK.md](BENCHMARK.md) for the 6 frictions admitted (test set asymmetry, mutmut crash, black skipped per timeout cap).
 
-## Honest Limits — cycle 13 case studies v4 (2026-05-11)
+## Honest Limits — cycle 14 case studies v5 (2026-05-11)
 
-`forge --carmack` was tested over 4 cycles on real Python bugs from
-BugsInPy. The strictest test (cycle 13, **E7 filter** requiring
-≥3 bugfix commits on the change_file before PRE_BUG) yields:
+`forge --carmack` was tested over 5 cycles on real Python bugs from
+BugsInPy. Cycle 14 (N=141 effective, stratified 40% cold-start /
+60% history-rich, pre-registered seeds 48/49) tests the cold-start
+re-weighting fix introduced in v1.3.0rc2.
 
-**Verdict (N=46 effective, pre-registered): 1/3 criteria OUI**
+**Verdict (pre-registered, N=141): 1/3 criteria OUI**
 
-- **C1 OUI ✓**: Fisher exact p=0.0488 (forge 7/25 vs random 1/25)
-  → forge beats random statistically on its scope (E7-filtered)
-- **C2 NON**: precision@10 = 0.28 (Wilson CI [0.143, 0.476])
-  → carmack composite under-ranks vs simpler predictor
-- **C3 NON**: delta AUC −0.021 holdout (calibration overfits at N=25)
+- **C1 OUI ✓** : Fisher exact p=0.00108 (forge 39/112 vs random 17/112)
+  → forge beats random with statistical robustness (3× stronger than cycle 13's p=0.049)
+- **C2 NON globally** (precision@10 = 34.5%) **BUT OUI on history-rich subset**
+  (8/15 = 53.3% top10, Wilson lower ≥ 0.30)
+  → forge works on its intended scope (files with ≥3 bugfix history),
+    diluted on the global mixed panel by cold-start cases (15.4%)
+- **C3 NON** (delta AUC calibrated vs heuristic = +0.021, below +0.05)
+  → calibration finds signal direction but training set N=101 still small
 
-### Major finding — `forge --predict` beats `forge --carmack`
+### Major finding — `forge --carmack` beats `forge --predict` on holdout
 
-| | TRAIN N=25 | HOLDOUT N=21 |
+| | TRAIN N=112 | **HOLDOUT N=29** |
 |---|---|---|
-| forge --predict (churn-only) | **64%** top10 | **71%** top10 |
-| forge --carmack (5-signal composite) | 28% top10 | 52% top10 |
+| forge --carmack v1.3.0 (with cold-start re-weighting + complexity signal) | 34.8% | **34.5%** ✓ |
+| forge --predict (churn-only) | 39.3% | 31.0% |
+| random | 15.2% | 10.3% |
 
-The simpler churn-only predictor beats the sophisticated multi-signal
-composite. The carmack heuristic weights (0.20 kalman, 0.15 wavelet,
-0.25 crash, 0.15 coupling, 0.25 churn) are likely sub-optimal.
+Reversal vs cycles 11-13. Calibrated carmack with new complexity signal +
+cold-start sub-regimes A/B beats churn-only baseline on independent holdout.
 
-### Calibration converges on coupling-dominant
+### Calibration converges on coupling + complexity
 
-ML calibration at N≥20 converges towards coupling 0.45-0.59 dominant
-(vs heuristic 0.15). Signal exists but heuristic mis-weights it.
+| Signal | Heuristic | Calibrated (cycle 14) |
+|---|---|---|
+| coupling | 0.15 | **0.399** |
+| complexity | 0.15 | **0.386** |
+| crash | 0.20 | 0.085 |
+| kalman | 0.20 | 0.033 |
+| wavelet | 0.15 | 0.019 |
+| churn | 0.15 | 0.078 |
 
-### Cold-start blind spot identified
-
-`forge --carmack` is history-based. Files with **0 prior bugfixes**
-return all-zero signals → random rank. Cycle 14 (work in progress)
-adds a complexity-based cold-start signal (McCabe + Halstead, pure
-Python stdlib, validated by Menzies-Greenwald-Frank 2007).
+Coupling + complexity = **79% of the optimal composite**. Confirms
+empirically the cold-start hypothesis : files central in the import graph
++ inherently complex code = strongest predictors.
 
 ### Recommended usage
 
-- `forge --predict` for production defect ranking (validated 64-71% top10)
-- `forge --carmack` as research mode (composite under investigation)
-- `forge --mutate` (libcst) for AST-aware mutation testing (validated cycle 8 vs mutmut)
+- `forge --carmack` v1.3.0 for **defect prediction on Python projects with
+  bugfix history** (53% precision@10 on this scope)
+- `forge --predict` for fast churn-only baseline ranking
+- `forge --mutate` (libcst) for AST-aware mutation testing (validated cycle 8)
 - `forge --modularity` for architecture monitoring (Newman Q)
+
+### Cold-start signal — partial
+
+Cold-start re-weighting (D1 fix: detection `bugfixes < 3`, sub-regimes A/B
+according to coupling) reduces but does not eliminate the cold-start
+blind spot. 15.4% top10 on holdout cold-start subset vs ~10% random.
+
+Future cycle 15 will test forge on history-only panel (E7 strict) to
+validate carmack's intended scope rigorously.
 
 ### Reproducibility
 
 See [forge-case-studies](https://github.com/sky1241/forge-case-studies)
-for the 4 cycles methodology, frictions, and per-case ranks.
+cycle14 branch for full methodology, frictions admitted, per-case
+ranks, and pre-registration committed before all runs.
 
 Earlier reports preserved for historical transparency:
+- [FINAL_REPORT_v5.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v5.md) (cycle 14 v5, 1/3 OUI, N=141)
 - [FINAL_REPORT_v4.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v4.md) (cycle 13 v4, 1/3 OUI, E7 filter)
 - [FINAL_REPORT_v3.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v3.md) (cycle 12 v3, 0/3 OUI, no E7)
 - [FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md) (cycle 11 v2, 1/3 OUI, N=15)

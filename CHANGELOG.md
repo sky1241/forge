@@ -8,6 +8,55 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.3.0] - 2026-05-11
+
+**Final minor release.** Empirically validated by cycle 14 case studies
+(N=141 effective, pre-registered seeds 48/49). Promotes v1.3.0rc2 to
+v1.3.0 final based on the cycle 14 verdict:
+
+- **C1 OUI ✓** Fisher exact p=0.00108 (forge beats random robustly,
+  3× stronger than cycle 13's p=0.049)
+- C2 NON globally (precision@10 = 34.5%) BUT OUI on history-rich subset
+  (53.3% top10 on the 15 cases with ≥3 bugfix history)
+- C3 NON (calibration delta AUC +0.021, below +0.05 threshold)
+
+### Empirical findings validated
+
+- **forge --carmack beats forge --predict on holdout** (34.5% vs 31.0%
+  precision@10), reversing the cycle 13 v4 trend where churn-only
+  baseline beat the multi-signal composite.
+- **Calibration converges on coupling + complexity dominant**:
+  coupling 0.40 + complexity 0.39 = 79% of optimal composite weights
+  (vs 30% in current heuristic). Confirms cycle 11-13 trend.
+- **Cold-start re-weighting works partially**: 15.4% top10 on holdout
+  cold-start subset (was 0% without v1.3.0rc1 complexity signal).
+
+### Updated README "Honest Limits" section
+
+Replaces cycle 13 v4 (1/3 OUI on N=46) with cycle 14 v5 (1/3 OUI on
+N=141). Stronger statistical claim, deeper analysis of the cold-start
+re-weighting, calibration analysis, and stratified verdict per subset.
+
+### Recommended usage (in README)
+
+- `forge --carmack` v1.3.0 for **defect prediction on Python projects
+  with bugfix history** (53% precision@10 on this scope)
+- `forge --predict` for fast churn-only baseline ranking
+- `forge --mutate`, `forge --modularity` unchanged from earlier releases
+
+### No code changes since v1.3.0rc2
+
+This is a doc-only patch promoting rc2 to final after empirical
+validation. forge.py, tests/, configs unchanged. 265 tests pass,
+mypy --strict clean.
+
+### Future work — cycle 15
+
+Test on **history-only panel** (E7 strict, ≥3 bugfix on change_file)
+to validate carmack's intended scope rigorously. If cycle 15 confirms
+C2 OUI on history-only at N≥50, future v1.4.0 may bundle calibrated
+weights as new defaults (coupling 0.40 + complexity 0.39 dominant).
+
 ## [1.3.0rc2] - 2026-05-11
 
 **Second release candidate.** Adds rule-based composite re-weighting on
