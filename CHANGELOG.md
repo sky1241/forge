@@ -8,6 +8,70 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.3.0rc1] - 2026-05-11
+
+**Release candidate.** Adds cold-start complexity signal to `forge --carmack`
+to address the cold-start blind spot identified in cycle 12 v3 / cycle 13 v4
+(carmack signals all 0 on files with 0 prior bugfixes).
+
+### Added
+- **6th signal `complexity` in carmack composite** — non-history-based AST
+  metric combining:
+  - McCabe 1976 cyclomatic complexity (decision points + 1 base)
+  - Halstead 1977 software science (volume, difficulty, effort)
+  - Max nesting depth (If / For / While / Try / With / FunctionDef)
+  - LOC penalty
+  All pure Python stdlib (no numpy/scipy). AST-based.
+  Reference: Menzies-Greenwald-Frank 2007 "Data Mining Static Code
+  Attributes to Learn Defect Predictors" IEEE TSE.
+
+- **3 new top-level functions** in `forge.py`:
+  - `_compute_mccabe_complexity(source: str) -> int`
+  - `_compute_halstead_metrics(source: str) -> dict[str, float]`
+  - `_compute_max_nesting_depth(source: str) -> int`
+  - `_compute_complexity_score(file_path: Path) -> float` (combined, [0, 1])
+
+- **16 new tests** in `TestCycle14ColdStartComplexity` class covering:
+  - McCabe edge cases (simple if, zero decision, nested loops, bool chains, syntax error)
+  - Halstead formulas (volume / difficulty match formula, empty source, syntax error)
+  - Nesting depth (flat, function with if/for)
+  - Complexity score (empty file zero, complex > simple, fresh file works, clamped to [0,1])
+  - Composite weights default includes complexity, sums to 1.0
+
+### Changed
+- **Default `carmack_composite_weights`** updated to 6 signals:
+  - Before: `kalman 0.25, wavelet 0.20, crash 0.25, coupling 0.15, churn 0.15` (sum 1.00)
+  - After:  `kalman 0.20, wavelet 0.15, crash 0.20, coupling 0.15, churn 0.15, complexity 0.15` (sum 1.00)
+  - Crash (KM survival) reduced from 0.25 to 0.20 to make room for complexity.
+  - Backward compatible: if user's `.forge/config.json` has only 5 weights,
+    complexity defaults to 0 (no contribution to score). Use `cw.get("complexity", 0.0)`.
+
+- **`predict_carmack()` integration**: computes complexity per file before
+  composing the score. `r["complexity"]` exposed in result dicts.
+
+### Why rc1 (not 1.3.0 final)
+The cycle 14 case-study test (N≥200 on E7-filtered + cold-start cases) is
+**not yet run**. v1.3.0 final will land after empirical validation that
+adding complexity signal:
+- Improves `forge --carmack` precision@10 above the cycle 13 v4 baseline (0.28 train)
+- Beats `forge --predict` (which beat carmack 64% vs 28% in cycle 13 v4)
+- Calibration delta AUC ≥ +0.05 on holdout (cycle 13 v4 was −0.021)
+
+If cycle 14 fails to validate, this rc1 stays rc1 forever (no v1.3.0 release).
+If cycle 14 validates, rc1 → v1.3.0 final.
+
+### Internal
+- mypy --strict forge.py: Success no issues
+- pytest tests/: 262 passed (16 new cycle 14 + 246 existing)
+- Branch `feat/cold_start_complexity` → PR → CI 9/9 → merge → tag v1.3.0rc1
+
+### Reference
+- McCabe T. (1976), "A Complexity Measure", IEEE TSE
+- Halstead M. (1977), "Elements of Software Science"
+- Menzies T., Greenwald J., Frank A. (2007), "Data Mining Static Code
+  Attributes to Learn Defect Predictors", IEEE TSE — empirical validation
+  that static metrics predict defects independently of history.
+
 ## [1.2.5] - 2026-05-11
 
 Doc-only patch. Updates **"Honest Limits"** section in README with
