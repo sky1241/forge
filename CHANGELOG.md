@@ -8,6 +8,51 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.2.4] - 2026-05-11
+
+Doc-only patch. Updates **"Honest Limits"** section in README with
+cycle 12 v3 case-study verdict — **N=37 effective, 0/3 criteria OUI**.
+Supersedes cycle 11 v2 verdict (1/3 OUI on N=15).
+
+### Changed
+- README "Honest Limits" section updated v2 → v3:
+  - N=20 train + N=17 holdout (vs N=8+7 in v2)
+  - All 3 criteria NON (vs C2 OUI in v2)
+  - C1 Fisher p=0.72 (forge 6/20 vs random 4/20 — no signal at N=20)
+  - C2 precision@10 = 0.30, Wilson CI [0.146, 0.519]
+  - C3 delta AUC holdout +0.039 (sous +0.05 mais positif vs v1's -0.054)
+  - Decision matrix verdict: `forge_au_niveau_hasard`
+  - Cold-start blind spot documented: forge --carmack signals all 0
+    on modules with 0 prior bugfixes (thefuck rules pattern)
+  - Calibration NOT robust at N: v2 favors crash+kalman, v3 favors
+    coupling. Different optima at different N → signal not stable.
+  - Recommended use case: established codebases with ≥1 year of fix
+    commits per module. Not reliable on fresh modules / new projects.
+
+### Unchanged (intentional, per D9 anti-bullshit)
+- **Default heuristic weights unchanged**: `(kalman 0.20, wavelet 0.15,
+  crash 0.25, coupling 0.15, churn 0.25)`. Calibration v3 (coupling
+  0.59 dominant) differs from v2 (crash 0.50 + kalman 0.35) → not
+  robust at N=20 to commit.
+- No code change in `forge.py`. Pure doc patch updating the v2 verdict
+  with the more rigorous v3 verdict (N×2.5, all 6 sub-cmds per case
+  including --locate with active coverage setup vs v2's --locate skip).
+
+### Internal — process discipline
+- Charter D9 (admit losses) honored: the v3 verdict (0/3 OUI) is
+  WORSE than v2 (1/3 OUI) but published prominently. Hiding the
+  cycle 12 result while keeping the v2 "Honest Limits" claim would
+  be mensonge par omission.
+- v2 C2 OUI is now understood as favorable signal by chance at small
+  N=8 with bug-prone project mix. v3 N=20 with diverse panel
+  (including cold-start cases) shows no robust signal.
+
+### Cycle 13 prospects
+If Sky agrees, cycle 13 could test N≥100 with panel **filtered by
+bugfix history ≥ 1** (within carmack's original scope as history-based
+predictor). NOT p-hacking since this scope is what carmack is designed
+for. Would clarify if forge has a real signal on its intended use case.
+
 ## [1.2.3] - 2026-05-11
 
 Doc-only patch. Adds **"Honest Limits"** section to README with

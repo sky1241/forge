@@ -26,37 +26,54 @@ forge --shield   # orchestrate: predict → gen tests → run impacted
 
 See [BENCHMARK.md](BENCHMARK.md) for the 6 frictions admitted (test set asymmetry, mutmut crash, black skipped per timeout cap).
 
-## Honest Limits — cycle 11 case studies v2 (2026-05-11)
+## Honest Limits — cycle 12 case studies v3 (2026-05-11)
 
-`forge --carmack` was tested on real Python bugs from BugsInPy +
-GitHub fallback (stratified small + medium + large, pre-registered
-seeds 42/43, 400 candidates exhaustively filtered), see
-[forge-case-studies](https://github.com/sky1241/forge-case-studies).
+`forge --carmack` was tested on real Python bugs from BugsInPy
+(stratified small + medium + large, pre-registered seeds 44/45,
+N=48 sampled / N=37 effective after SKIP file_missing_at_pre).
 
-Verdict (pre-registered, N=15 effective): **1/3 criteria OUI**.
+**Verdict (pre-registered, N=20 train + N=17 holdout): 0/3 criteria OUI.**
 
-- **C2 OUI**: precision@10 = 0.625 (5/8 train, 4/7 holdout),
-  Wilson 95% CI lower bound 0.306 ≥ 0.30 threshold.
-- **C1 NON**: Fisher exact p=0.31 (forge 5/8 vs random 2/8 top10).
-  Signal exists but N=8 underpowered.
-- **C3 NON**: learned calibration delta AUC on holdout = +0.0095
-  (below 0.05 threshold). Better than v1 (-0.054 was overfit),
-  but not enough to replace heuristic.
+- **C1 NON**: Fisher exact p=0.72 (forge 6/20 vs random 4/20 top10)
+- **C2 NON**: precision@10 = 0.30, Wilson 95% CI [0.146, 0.519]
+- **C3 NON**: calibrated AUC holdout +0.039 over heuristic (below 0.05 threshold)
 
-**Default heuristic weights remain unchanged**: (0.20 kalman,
-0.15 wavelet, 0.25 crash, 0.15 coupling, 0.25 churn). Calibration
-suggests crash+kalman dominate (sum 85%) but signal too weak on
-N=8 train to commit.
+Decision matrix pre-registered: `forge_au_niveau_hasard`.
 
-**Unexpected finding**: `forge --predict` (churn-only) beats
-`forge --carmack` (multi-signal) 6/8 top10 vs 5/8 on train.
-Multi-signal aggregation may dilute pure churn predictor on this
-panel. Under investigation cycle 12.
+### Cold-start blind spot identified
 
-See [forge-case-studies/FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md)
-for the full methodology, 10 frictions admitted, and per-case ranks.
+`forge --carmack` relies on bugfix history (Kalman, Wavelet, Crash,
+Coupling, Churn — all history-based signals). On modules with **0 prior
+bugfixes**, all signals are 0 → rank is essentially random. The v3
+panel included many such cases (e.g. fresh `thefuck/rules/*` modules)
+where forge systematically under-ranks them.
 
-**Reproducibility**: `git clone forge-case-studies && bash run_all.sh`
+### Calibration not robust at N
+
+v2 (N=8) calibrated weights: crash 0.50 + kalman 0.35 dominant.
+v3 (N=20) calibrated weights: coupling 0.59 dominant.
+
+Different optima at N=8 vs N=20 → signal is not stable. **Default
+heuristic weights remain unchanged**: (0.20 kalman, 0.15 wavelet,
+0.25 crash, 0.15 coupling, 0.25 churn).
+
+### Recommended use cases
+
+forge --carmack works best on projects with **rich bugfix history**
+(established codebases, ≥1 year of fix commits per module). It is
+**not a reliable predictor on fresh modules or new projects**.
+
+### Reproducibility
+
+See [forge-case-studies/FINAL_REPORT_v3.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v3.md)
+for full methodology, 12 frictions admitted, per-case ranks, and
+the `forge --locate` setup limitation (41% of legacy cases skipped
+due to Python version incompatibility — not usable at scale without
+pyenv per-case setup).
+
+Earlier reports preserved for historical transparency:
+- [FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md) (cycle 11 v2, 1/3 OUI on N=15)
+- v1 INVALID (cycle 11 v1, REVERT commit `0b55e2a`)
 
 ## What's new (cycle 4)
 
