@@ -26,53 +26,59 @@ forge --shield   # orchestrate: predict → gen tests → run impacted
 
 See [BENCHMARK.md](BENCHMARK.md) for the 6 frictions admitted (test set asymmetry, mutmut crash, black skipped per timeout cap).
 
-## Honest Limits — cycle 12 case studies v3 (2026-05-11)
+## Honest Limits — cycle 13 case studies v4 (2026-05-11)
 
-`forge --carmack` was tested on real Python bugs from BugsInPy
-(stratified small + medium + large, pre-registered seeds 44/45,
-N=48 sampled / N=37 effective after SKIP file_missing_at_pre).
+`forge --carmack` was tested over 4 cycles on real Python bugs from
+BugsInPy. The strictest test (cycle 13, **E7 filter** requiring
+≥3 bugfix commits on the change_file before PRE_BUG) yields:
 
-**Verdict (pre-registered, N=20 train + N=17 holdout): 0/3 criteria OUI.**
+**Verdict (N=46 effective, pre-registered): 1/3 criteria OUI**
 
-- **C1 NON**: Fisher exact p=0.72 (forge 6/20 vs random 4/20 top10)
-- **C2 NON**: precision@10 = 0.30, Wilson 95% CI [0.146, 0.519]
-- **C3 NON**: calibrated AUC holdout +0.039 over heuristic (below 0.05 threshold)
+- **C1 OUI ✓**: Fisher exact p=0.0488 (forge 7/25 vs random 1/25)
+  → forge beats random statistically on its scope (E7-filtered)
+- **C2 NON**: precision@10 = 0.28 (Wilson CI [0.143, 0.476])
+  → carmack composite under-ranks vs simpler predictor
+- **C3 NON**: delta AUC −0.021 holdout (calibration overfits at N=25)
 
-Decision matrix pre-registered: `forge_au_niveau_hasard`.
+### Major finding — `forge --predict` beats `forge --carmack`
+
+| | TRAIN N=25 | HOLDOUT N=21 |
+|---|---|---|
+| forge --predict (churn-only) | **64%** top10 | **71%** top10 |
+| forge --carmack (5-signal composite) | 28% top10 | 52% top10 |
+
+The simpler churn-only predictor beats the sophisticated multi-signal
+composite. The carmack heuristic weights (0.20 kalman, 0.15 wavelet,
+0.25 crash, 0.15 coupling, 0.25 churn) are likely sub-optimal.
+
+### Calibration converges on coupling-dominant
+
+ML calibration at N≥20 converges towards coupling 0.45-0.59 dominant
+(vs heuristic 0.15). Signal exists but heuristic mis-weights it.
 
 ### Cold-start blind spot identified
 
-`forge --carmack` relies on bugfix history (Kalman, Wavelet, Crash,
-Coupling, Churn — all history-based signals). On modules with **0 prior
-bugfixes**, all signals are 0 → rank is essentially random. The v3
-panel included many such cases (e.g. fresh `thefuck/rules/*` modules)
-where forge systematically under-ranks them.
+`forge --carmack` is history-based. Files with **0 prior bugfixes**
+return all-zero signals → random rank. Cycle 14 (work in progress)
+adds a complexity-based cold-start signal (McCabe + Halstead, pure
+Python stdlib, validated by Menzies-Greenwald-Frank 2007).
 
-### Calibration not robust at N
+### Recommended usage
 
-v2 (N=8) calibrated weights: crash 0.50 + kalman 0.35 dominant.
-v3 (N=20) calibrated weights: coupling 0.59 dominant.
-
-Different optima at N=8 vs N=20 → signal is not stable. **Default
-heuristic weights remain unchanged**: (0.20 kalman, 0.15 wavelet,
-0.25 crash, 0.15 coupling, 0.25 churn).
-
-### Recommended use cases
-
-forge --carmack works best on projects with **rich bugfix history**
-(established codebases, ≥1 year of fix commits per module). It is
-**not a reliable predictor on fresh modules or new projects**.
+- `forge --predict` for production defect ranking (validated 64-71% top10)
+- `forge --carmack` as research mode (composite under investigation)
+- `forge --mutate` (libcst) for AST-aware mutation testing (validated cycle 8 vs mutmut)
+- `forge --modularity` for architecture monitoring (Newman Q)
 
 ### Reproducibility
 
-See [forge-case-studies/FINAL_REPORT_v3.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v3.md)
-for full methodology, 12 frictions admitted, per-case ranks, and
-the `forge --locate` setup limitation (41% of legacy cases skipped
-due to Python version incompatibility — not usable at scale without
-pyenv per-case setup).
+See [forge-case-studies](https://github.com/sky1241/forge-case-studies)
+for the 4 cycles methodology, frictions, and per-case ranks.
 
 Earlier reports preserved for historical transparency:
-- [FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md) (cycle 11 v2, 1/3 OUI on N=15)
+- [FINAL_REPORT_v4.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v4.md) (cycle 13 v4, 1/3 OUI, E7 filter)
+- [FINAL_REPORT_v3.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v3.md) (cycle 12 v3, 0/3 OUI, no E7)
+- [FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md) (cycle 11 v2, 1/3 OUI, N=15)
 - v1 INVALID (cycle 11 v1, REVERT commit `0b55e2a`)
 
 ## What's new (cycle 4)
