@@ -169,8 +169,8 @@ FORGE_CONFIG_DEFAULTS = {
     # + Churn). Sum to 1.0; not empirically validated, override to bias
     # the ranking toward the signal that best fits your repo's bug shape.
     "carmack_composite_weights": {
-        "kalman": 0.25, "wavelet": 0.20, "crash": 0.25,
-        "coupling": 0.15, "churn": 0.15,
+        "kalman": 0.20, "wavelet": 0.15, "crash": 0.20,
+        "coupling": 0.15, "churn": 0.15, "complexity": 0.15,
     },
     # In --full-cycle, files smaller than this LOC are routed through
     # `--mutate` automatically. Bigger files require the user to invoke
@@ -3901,6 +3901,168 @@ def fault_locate(root: Path) -> bool:
     return True
 
 
+# === COLD-START SIGNALS — McCabe + Halstead (Menzies-Greenwald-Frank 2007) ===
+# Cycle 14: complement history-based Kalman/Wavelet/Crash/Coupling/Churn
+# with non-history complexity metrics so carmack can rank fresh modules
+# (0 prior bugfixes → cycle 12/13 cold-start blind spot identified).
+# Pure Python stdlib. No numpy/scipy. AST-based.
+
+
+def _compute_mccabe_complexity(source: str) -> int:
+    """McCabe 1976 cyclomatic complexity.
+
+    Counts decision points + 1 base path. Decision points: If, For,
+    While, Try (per ExceptHandler), With, BoolOp (per operand-1),
+    comprehensions (ListComp, SetComp, DictComp, GeneratorExp).
+
+    Returns at least 1 (a function with no branches). 0 on syntax error.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return 0
+    count = 1  # base path
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.AsyncFor, ast.With, ast.AsyncWith)):
+            count += 1
+        elif isinstance(node, ast.ExceptHandler):
+            count += 1
+        elif isinstance(node, ast.BoolOp):
+            count += max(0, len(node.values) - 1)
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            count += 1
+            for gen in getattr(node, "generators", []):
+                count += len(getattr(gen, "ifs", []))
+        elif isinstance(node, ast.IfExp):
+            count += 1
+    return count
+
+
+def _compute_halstead_metrics(source: str) -> dict[str, float]:
+    """Halstead 1977 software science metrics.
+
+    Operators: AST operation kinds (BinOp.op, UnaryOp.op, BoolOp.op,
+    Compare.ops, keywords like if/while/for via node class names).
+    Operands: Name.id, Constant.value (stringified), attribute names.
+
+    Returns dict with keys:
+      n1 = distinct operators, n2 = distinct operands,
+      N1 = total operators, N2 = total operands,
+      volume = (N1+N2) * log2(n1+n2),
+      difficulty = (n1/2) * (N2/n2),
+      effort = volume * difficulty.
+
+    All zeros on syntax error or empty source.
+    """
+    empty: dict[str, float] = {"n1": 0, "n2": 0, "N1": 0, "N2": 0,
+                                "volume": 0.0, "difficulty": 0.0, "effort": 0.0}
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return empty
+
+    operators: list[str] = []
+    operands: list[str] = []
+
+    for node in ast.walk(tree):
+        cls = type(node).__name__
+        if isinstance(node, ast.BinOp):
+            operators.append(type(node.op).__name__)
+        elif isinstance(node, ast.UnaryOp):
+            operators.append(type(node.op).__name__)
+        elif isinstance(node, ast.BoolOp):
+            operators.append(type(node.op).__name__)
+        elif isinstance(node, ast.Compare):
+            for op in node.ops:
+                operators.append(type(op).__name__)
+        elif isinstance(node, ast.AugAssign):
+            operators.append("AugAssign_" + type(node.op).__name__)
+        elif isinstance(node, (ast.If, ast.While, ast.For, ast.AsyncFor,
+                               ast.Try, ast.With, ast.AsyncWith, ast.Return,
+                               ast.Raise, ast.Assert, ast.Lambda, ast.IfExp,
+                               ast.ListComp, ast.SetComp, ast.DictComp,
+                               ast.GeneratorExp, ast.Await, ast.Yield,
+                               ast.YieldFrom, ast.Assign)):
+            operators.append(cls)
+        elif isinstance(node, ast.Call):
+            operators.append("Call")
+        elif isinstance(node, ast.Name):
+            operands.append(node.id)
+        elif isinstance(node, ast.Constant):
+            operands.append(repr(node.value))
+        elif isinstance(node, ast.Attribute):
+            operands.append(node.attr)
+
+    n1 = len(set(operators))
+    n2 = len(set(operands))
+    N1 = len(operators)
+    N2 = len(operands)
+    if n1 + n2 == 0 or N1 + N2 == 0:
+        return empty
+    volume = (N1 + N2) * math.log2(max(n1 + n2, 2))
+    difficulty = (n1 / 2.0) * (N2 / max(n2, 1))
+    effort = volume * difficulty
+    return {"n1": float(n1), "n2": float(n2), "N1": float(N1), "N2": float(N2),
+            "volume": volume, "difficulty": difficulty, "effort": effort}
+
+
+def _compute_max_nesting_depth(source: str) -> int:
+    """Maximum nesting depth across If/For/While/Try/With/Function.
+
+    Pure AST walk with depth tracking. 0 on syntax error.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return 0
+
+    NESTING_TYPES = (ast.If, ast.For, ast.While, ast.AsyncFor, ast.With, ast.AsyncWith,
+                     ast.Try, ast.FunctionDef, ast.AsyncFunctionDef)
+
+    def walk(node: ast.AST, depth: int) -> int:
+        max_d = depth
+        for child in ast.iter_child_nodes(node):
+            child_depth = depth + 1 if isinstance(child, NESTING_TYPES) else depth
+            max_d = max(max_d, walk(child, child_depth))
+        return max_d
+
+    return walk(tree, 0)
+
+
+def _compute_complexity_score(file_path: Path) -> float:
+    """Cold-start complexity-based defect risk in [0, 1].
+
+    Combines McCabe + Halstead effort + LOC penalty + max nesting depth.
+    Pure stdlib, no history dependency. Works on fresh files.
+
+    Normalisation heuristic:
+      mccabe_norm    = min(mccabe / 50, 1.0)     # 50 = "extremely complex"
+      effort_norm    = min(effort / 1e6, 1.0)    # 1e6 = "extreme effort"
+      loc_norm       = min(loc / 1000, 1.0)      # 1000 LOC = saturation
+      nesting_norm   = min(max_depth / 10, 1.0)  # depth 10 = severe
+      score = 0.30*mccabe_norm + 0.30*effort_norm + 0.20*loc_norm + 0.20*nesting_norm
+
+    Returns 0.0 on read error or empty file.
+    """
+    try:
+        source = file_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeError):
+        return 0.0
+    if not source.strip():
+        return 0.0
+    mccabe = _compute_mccabe_complexity(source)
+    halstead = _compute_halstead_metrics(source)
+    effort = halstead["effort"]
+    loc = len(source.splitlines())
+    max_depth = _compute_max_nesting_depth(source)
+
+    mccabe_norm = min(mccabe / 50.0, 1.0)
+    effort_norm = min(effort / 1e6, 1.0)
+    loc_norm = min(loc / 1000.0, 1.0)
+    nesting_norm = min(max_depth / 10.0, 1.0)
+    return 0.30 * mccabe_norm + 0.30 * effort_norm + 0.20 * loc_norm + 0.20 * nesting_norm
+
+
 # === CARMACK: ENHANCED DEFECT PREDICTION (Kalman + Wavelet + KM + Modularity) ===
 def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]] | None:
     """Cross-domain defect prediction. Replaces fixed weights with:
@@ -4053,16 +4215,28 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
     # Kalman ~ weekly bug count, wavelet ~ multi-band churn energy, KM ~ [0,1]).
     # Cycle 4 D-1: the inline `_norm` was a duplicate of _minmax_normalize
     # (top-level helper). Switched to the shared helper.
+    # === Cold-start complexity signal (cycle 14, non-history-based) ===
+    # Compute per-file complexity from AST. Lets carmack rank fresh modules
+    # (cold-start blind spot identified in cycle 12 v3 / cycle 13 v4).
+    for r in results:
+        try:
+            r["complexity"] = _compute_complexity_score(root / r["file"])
+        except (OSError, ValueError):
+            r["complexity"] = 0.0
+
     kalman_n = _minmax_normalize([r["kalman"] for r in results])
     wave_n = _minmax_normalize([r["wavelet_hf"] for r in results])
     crash_n = [r["crash_prob"] for r in results]  # already in [0, 1]
     coupling_n = _minmax_normalize([r["coupling"] for r in results])
     churn_n = _minmax_normalize([r["churn"] for r in results])
+    complexity_n = [r["complexity"] for r in results]  # already in [0, 1]
 
     # Composite Carmack score (heuristic weights, sum to 1.0).
     # NOTE: weights are not validated empirically — they reflect the relative
     # importance the author assigns to each signal. Override via
     # .forge/config.json `carmack_composite_weights` to tune per repo.
+    # Cycle 14: 6th signal "complexity" (McCabe + Halstead) added for
+    # cold-start cases; default weight 0.15 (5 history-based + 1 cold-start).
     cw = cfg["carmack_composite_weights"]
     for i, r in enumerate(results):
         r["score"] = (
@@ -4070,7 +4244,8 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
             cw["wavelet"] * wave_n[i] +
             cw["crash"] * crash_n[i] +
             cw["coupling"] * coupling_n[i] +
-            cw["churn"] * churn_n[i]
+            cw["churn"] * churn_n[i] +
+            cw.get("complexity", 0.0) * complexity_n[i]
         )
 
     results.sort(key=lambda x: x["score"], reverse=True)

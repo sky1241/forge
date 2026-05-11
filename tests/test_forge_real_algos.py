@@ -4076,3 +4076,129 @@ class TestCycle6IncrementalMutate:
         assert exc.value.code == 2
         out = capsys.readouterr().out
         assert "--since requires --incremental-mutate" in out
+
+
+class TestCycle14ColdStartComplexity:
+    """Cold-start complexity signal (cycle 14) — McCabe + Halstead + nesting.
+
+    Adds a 6th signal to forge --carmack composite that does NOT depend on
+    bugfix history. Lets carmack rank fresh modules (cold-start blind spot
+    identified cycle 12 v3 / cycle 13 v4).
+    """
+
+    def test_mccabe_simple_if_returns_2(self) -> None:
+        source = "def f(x):\n    if x:\n        return 1\n    return 0\n"
+        assert forge._compute_mccabe_complexity(source) == 2
+
+    def test_mccabe_zero_decision_returns_1(self) -> None:
+        source = "def f():\n    return 42\n"
+        assert forge._compute_mccabe_complexity(source) == 1
+
+    def test_mccabe_nested_loops_counts_correctly(self) -> None:
+        # 2 nested for + 1 if + 1 base = 4
+        source = "def f(xs):\n    for x in xs:\n        for y in x:\n            if y:\n                yield y\n"
+        # for + for + if = 3 decision + 1 base = 4
+        assert forge._compute_mccabe_complexity(source) == 4
+
+    def test_mccabe_boolop_chain(self) -> None:
+        # `a and b and c` adds 2 (3 operands - 1)
+        source = "def f(a, b, c):\n    return a and b and c\n"
+        # 1 base + 2 BoolOp operand pairs = 3
+        assert forge._compute_mccabe_complexity(source) == 3
+
+    def test_mccabe_syntax_error_returns_0(self) -> None:
+        assert forge._compute_mccabe_complexity("def broken(: )") == 0
+
+    def test_halstead_volume_matches_formula(self) -> None:
+        # Simple: `x = 1 + 2`
+        # operators: Assign, BinOp(Add) → 2 total, 2 distinct (n1=2, N1=2)
+        # operands: x, 1, 2 → 3 total, 3 distinct (n2=3, N2=3)
+        # volume = (2+3) * log2(2+3) = 5 * log2(5) ≈ 11.61
+        h = forge._compute_halstead_metrics("x = 1 + 2\n")
+        assert h["n1"] >= 2 and h["n2"] >= 3
+        assert h["N1"] >= 2 and h["N2"] >= 3
+        # Volume formula check
+        expected = (h["N1"] + h["N2"]) * math.log2(max(h["n1"] + h["n2"], 2))
+        assert abs(h["volume"] - expected) < 1e-6
+
+    def test_halstead_difficulty_matches_formula(self) -> None:
+        h = forge._compute_halstead_metrics("x = a + b\ny = a * b\n")
+        if h["n2"] > 0:
+            expected_diff = (h["n1"] / 2.0) * (h["N2"] / max(h["n2"], 1))
+            assert abs(h["difficulty"] - expected_diff) < 1e-6
+
+    def test_halstead_empty_source_zero(self) -> None:
+        h = forge._compute_halstead_metrics("")
+        assert h["volume"] == 0.0
+        assert h["effort"] == 0.0
+
+    def test_halstead_syntax_error_zero(self) -> None:
+        h = forge._compute_halstead_metrics("def f(: oops")
+        assert h["volume"] == 0.0
+
+    def test_nesting_depth_flat_is_zero(self, tmp_path: Path) -> None:
+        p = tmp_path / "flat.py"
+        p.write_text("x = 1\ny = 2\nz = x + y\n")
+        # No function, no nesting blocks → depth 0
+        assert forge._compute_max_nesting_depth(p.read_text()) == 0
+
+    def test_nesting_depth_function_with_if_for(self) -> None:
+        source = ("def f(xs):\n"
+                  "    for x in xs:\n"
+                  "        if x > 0:\n"
+                  "            for y in range(x):\n"
+                  "                yield y\n")
+        # FunctionDef(1) -> For(2) -> If(3) -> For(4) → depth 4
+        assert forge._compute_max_nesting_depth(source) == 4
+
+    def test_complexity_score_zero_on_empty_file(self, tmp_path: Path) -> None:
+        p = tmp_path / "empty.py"
+        p.write_text("")
+        assert forge._compute_complexity_score(p) == 0.0
+
+    def test_complexity_score_higher_for_complex_file(self, tmp_path: Path) -> None:
+        simple = tmp_path / "simple.py"
+        simple.write_text("x = 1\n")
+        complex_p = tmp_path / "complex.py"
+        # Many decisions + many operators + deep nesting
+        complex_src = (
+            "def heavy(data):\n"
+            "    result = []\n"
+            "    for item in data:\n"
+            "        if isinstance(item, dict):\n"
+            "            for k, v in item.items():\n"
+            "                if v is not None and k != 'skip':\n"
+            "                    try:\n"
+            "                        result.append(str(v).strip())\n"
+            "                    except (ValueError, TypeError):\n"
+            "                        result.append('')\n"
+            "        elif isinstance(item, list):\n"
+            "            result.extend([x for x in item if x])\n"
+            "    return result\n"
+        )
+        complex_p.write_text(complex_src)
+        assert forge._compute_complexity_score(complex_p) > forge._compute_complexity_score(simple)
+
+    def test_complexity_score_works_on_fresh_file_zero_history(self, tmp_path: Path) -> None:
+        # The whole point: this signal is computable on a fresh file
+        # with no git history at all.
+        p = tmp_path / "fresh.py"
+        p.write_text("def f(x):\n    if x > 0:\n        return x\n    return 0\n")
+        s = forge._compute_complexity_score(p)
+        assert 0.0 < s <= 1.0
+
+    def test_complexity_score_clamped_to_unit_interval(self, tmp_path: Path) -> None:
+        # Build an intentionally pathological file with high McCabe
+        ifs = "\n".join(f"    if x > {i}: x += {i}" for i in range(200))
+        p = tmp_path / "patho.py"
+        p.write_text(f"def f(x):\n{ifs}\n    return x\n")
+        s = forge._compute_complexity_score(p)
+        assert 0.0 <= s <= 1.0
+
+    def test_carmack_composite_weights_default_includes_complexity(self) -> None:
+        cw = forge.FORGE_CONFIG_DEFAULTS["carmack_composite_weights"]
+        assert "complexity" in cw
+        assert isinstance(cw["complexity"], (int, float))
+        # All weights sum to ~1.0
+        total = sum(cw.values())
+        assert abs(total - 1.0) < 1e-6, f"weights sum {total} != 1.0"
