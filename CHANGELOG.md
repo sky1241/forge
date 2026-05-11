@@ -8,6 +8,52 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.3.1] - 2026-05-11
+
+Doc-only patch. Updates README "Honest Limits" v5 → v6 with cycle 15
+findings.
+
+### Changed
+- README "Honest Limits" v5 → **v6** with cycle 15 verdict (N=131
+  history-only scope, E7 strict ≥3 bugfix, seeds 50/51):
+  - C1 OUI **very robust** : Fisher p=2.5e-9 (9 orders of magnitude
+    stronger than cycle 13's p=0.049)
+  - C2 NON : p@10=44.8% (sub 50% threshold), monotonic improvement
+    cycle 13→14→15: 28% → 35% → 45%
+  - C3 NON : delta AUC +0.018, calibration unstable across cycles
+- **3rd confirmation `forge --predict` > `forge --carmack`** :
+  predict 58% train + 54% holdout vs carmack 45% + 31%.
+  Pattern across cycles 11 v2, 13 v4, 15 v6.
+- Recommended usage in README updated: **`forge --predict` is now
+  the primary recommended predictor**, `forge --carmack` reclassed
+  as "research mode" with note that heuristic weights are not
+  validated (cycle 14/15 calibration grid converged on different
+  signals — coupling vs complexity).
+
+### Unchanged (intentional)
+- Default heuristic weights unchanged: `(kalman 0.20, wavelet 0.15,
+  crash 0.20, coupling 0.15, churn 0.15, complexity 0.15)`. Calibration
+  inconsistent across cycles, no robust replacement.
+- No code change in `forge.py`. Pure doc patch.
+
+### Internal
+- mypy --strict forge.py: Success no issues
+- pytest tests/: 265 passed
+- Branch `cycle15_honest_limits_v6` → PR → CI 9/9 → merge → tag v1.3.1
+
+### Background — 5 cycles progression preserved
+
+| Cycle | N | C1 | C2 | C3 | Score |
+|---|---|---|---|---|---|
+| 11 v2 | 15 | NON p=0.31 | OUI ✓ favorable | NON | 1/3 |
+| 12 v3 | 37 | NON p=0.72 | NON | NON | 0/3 |
+| 13 v4 | 46 | OUI p=0.049 | NON | NON | 1/3 |
+| 14 v5 | 141 | OUI p=0.001 | NON 35% glob/53% history | NON | 1/3 |
+| 15 v6 | 131 | OUI p=2.5e-9 | NON 45% | NON | 1/3 |
+
+C1 Fisher p drops 9 orders of magnitude cycle 13 → 15. C2 p@10
+monotonic improvement 28% → 35% → 45% but doesn't cross 50% threshold.
+
 ## [1.3.0] - 2026-05-11
 
 **Final minor release.** Empirically validated by cycle 14 case studies
