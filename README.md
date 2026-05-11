@@ -26,60 +26,75 @@ forge --shield   # orchestrate: predict → gen tests → run impacted
 
 See [BENCHMARK.md](BENCHMARK.md) for the 6 frictions admitted (test set asymmetry, mutmut crash, black skipped per timeout cap).
 
-## Honest Limits — cycle 15 case studies v6 (2026-05-11)
+## Honest Limits — full cycles 11→20 v7 (2026-05-11)
 
-forge has been tested over 6 cycles on real Python bugs from BugsInPy
-with pre-registration committed publicly before each run, see
+forge has been tested through 10+ pre-registered scientific cycles on
+BugsInPy real Python bugs. Full methodology + verdicts public on
 [forge-case-studies](https://github.com/sky1241/forge-case-studies).
 
-Cycle 15 (N=131 effective, history-only scope, E7 strict ≥3 bugfix,
-seeds 50/51, 6 sub-cmds verified) gives the strongest verdict :
+### Production-validated capabilities
 
-**Verdict (pre-registered, N=131): 1/3 criteria OUI** :
+- **`forge --predict`** (Nagappan-Ball ICSE 2005, churn-only) :
+  **recommended primary defect predictor**. 54-71% precision@10 holdout
+  on E7-filtered scope (≥3 bugfix history). Beats multi-signal composite
+  in 3 independent cycles (11 v2, 13 v4, 15 v6).
+- **`forge --carmack`** (6-signal composite) : research mode, weights
+  heuristic non-validated. Cycle 15 verdict 1/3 OUI (C1 Fisher p=2.5e-9
+  very robust ; C2 plafond ~45% global). Cycle 19 v2 ablation drop
+  kalman+wavelet = **ambigu** (TH +2.3 / REF -16.7 pts, populations
+  partially disjoint 50% overlap, hétérogénéité per-projet majeure).
+  Keep 6-signal composite = conservative default.
+- **`forge --modularity`** : Newman-Girvan Q architecture metric,
+  validated cycle 8 vs pydeps.
+- **`forge --mutate`** : libcst AST-aware mutation testing, validated
+  cycle 8 vs mutmut (100% kill in 11min vs mutmut 33% in 16min on
+  httpie/cli/argparser.py).
+- **`forge --gen-props` / `--minimize` / `--snapshot` / `--watch` /
+  `--bisect` / `--flaky`** : validated cycle 20 v2 on 30 real cases
+  (5 projects × 6 tools, 100% ratio_ok with graceful exits).
 
-- **C1 OUI ✓ very robust** : Fisher exact p = 2.5e-9 (forge 47/105 vs
-  random 9/105 top10). 9 orders of magnitude stronger than cycle 13.
-- **C2 NON** : precision@10 = 44.8% (sub 50% threshold). Pattern monotonic
-  cycle 13→14→15 : 28% → 35% → 45%, but doesn't cross 50%.
-- **C3 NON** : delta AUC +0.018 (sub +0.05). Calibration ML unstable
-  across cycles (cycle 14 dominant coupling+complexity ; cycle 15
-  dominant complexity alone).
+### Not recommended for production
 
-### Major finding — `forge --predict` beats `forge --carmack` (3rd confirmation)
+- **`forge --locate`** : Ochiai SBFL needs failing tests + path filter.
+  Research mode only (cycle 17 verdict: 6.7% top30 on BugsInPy PRE_BUG —
+  ranks system files without filter).
+- **`forge --shield`** : works on active projects (≥3 commits in
+  `--weeks N` window, default 4). Short-circuits gracefully on dormant
+  projects (cycle 18 v2: 11/11 active vs 0/9 dormant). Document
+  `--weeks N` to widen window before use on quiet repos.
 
-| Predictor | TRAIN N=105 | HOLDOUT N=26 |
-|---|---|---|
-| **forge --predict (churn-only baseline)** | **58.1%** top10 | **53.8%** top10 ✓ above 50% |
-| forge --carmack (multi-signal composite) | 44.8% | 30.8% |
-| random | 8.6% | 7.7% |
+### Honest findings cycles 11→20
 
-**Empirical conclusion** : simple churn-only baseline (Nagappan-Ball
-ICSE 2005) outperforms the sophisticated multi-signal composite on
-Python defect prediction at this scale (3 independent cycles confirm).
+| Cycle | Hypothesis | Verdict | Note |
+|---|---|---|---|
+| 11-15 | forge --carmack baseline calibrations | 1/3 OUI (cycle 15 strongest) | Fisher p=2.5e-9 (C1) but plafond C2 |
+| 16 v1+v2 | Cold-start AST similarity signal | REJECTED (drop signal) | Jaccard quasi-uniform on Python files |
+| 17 | forge --locate at scale | REJECTED user-facing | SBFL ranks system files w/o filter |
+| 18 v2 | forge --shield on HEAD actuel | OUI conditional | 11/11 active, 0/9 dormant |
+| 19 v2 | Composite ablation drop kalman+wavelet | **AMBIGU** | Populations disjoint, hétérogène per-proj |
+| 20 v2 | Sanity at scale (5+ cases/tool) | **OUI ferme** | 6/6 tools 100% on 30 real cases |
 
-### Recommended usage in production
+### Known bug — to fix in v2.1
 
-- **`forge --predict`** : recommended primary defect predictor.
-  54% precision@10 holdout on E7-filtered scope (≥3 bugfix history).
-- `forge --carmack` : research mode. Composite multi-signal kept for
-  experimentation, but heuristic weights are not validated.
-- `forge --mutate` (libcst) : AST-aware mutation testing, validated
-  cycle 8 vs mutmut.
-- `forge --modularity` : Newman Q architecture metric, validated cycle 8
-  vs pydeps.
+`forge --shield` / `forge --carmack` `--weeks N` use system date, not
+PRE_BUG commit date. Affects benchmarks on historical commits
+(BugsInPy cycles 12, 17, 18 v1). Patch `--weeks-from REF_DATE` planned
+v2.1. See BUGS.md BUG-014.
 
 ### Reproducibility
 
-5 FINAL_REPORTs publicly available (cycles 11 v2, 12 v3, 13 v4,
-14 v5, 15 v6) with pre-registration committed before all runs.
-Seeds 42/43, 44/45, 48/49, 50/51 — all disjoint.
+10+ FINAL_REPORTs publicly available with pre-registration committed
+before all runs. Seeds 42/43, 44/45, 48/49, 50/51, 52/53, 54/55,
+56/57 — all disjoint inter-cycles.
 
-Earlier reports preserved for historical transparency:
-- [FINAL_REPORT_v6.md](https://github.com/sky1241/forge-case-studies/blob/cycle15/FINAL_REPORT_v6.md) (cycle 15, N=131 history-only, C1 p=2.5e-9)
-- [FINAL_REPORT_v5.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v5.md) (cycle 14, N=141 mixed)
-- [FINAL_REPORT_v4.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v4.md) (cycle 13, E7 filter)
-- [FINAL_REPORT_v3.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v3.md) (cycle 12, 0/3 OUI)
-- [FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md) (cycle 11 v2)
+Latest reports:
+- [FINAL_REPORT_v12_v2.md](https://github.com/sky1241/forge-case-studies/blob/cycle20_v2/FINAL_REPORT_v12_v2.md) (cycle 20 v2, sanity at scale, 6/6 OUI)
+- [FINAL_REPORT_v11_v2.md](https://github.com/sky1241/forge-case-studies/blob/cycle19_v2/FINAL_REPORT_v11_v2.md) (cycle 19 v2, ablation AMBIGU)
+- [FINAL_REPORT_v10_v2.md](https://github.com/sky1241/forge-case-studies/blob/cycle18_v2/FINAL_REPORT_v10_v2.md) (cycle 18 v2, shield HEAD actuel)
+- [FINAL_REPORT_v9.md](https://github.com/sky1241/forge-case-studies/blob/cycle17/FINAL_REPORT_v9.md) (cycle 17, locate REJECTED)
+- [FINAL_REPORT_v8.md](https://github.com/sky1241/forge-case-studies/blob/cycle16_v2/FINAL_REPORT_v8.md) (cycle 16 v2, similarity REJECTED)
+- [FINAL_REPORT_v6.md](https://github.com/sky1241/forge-case-studies/blob/cycle15/FINAL_REPORT_v6.md) (cycle 15, C1 p=2.5e-9 robust)
+- Earlier cycles 11-14 preserved on forge-case-studies main branch
 
 ## What's new (cycle 4)
 

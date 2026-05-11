@@ -8,6 +8,75 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [2.0.0] - 2026-05-11
+
+Major version bump for **honest correction** of cycles 16-20 verdicts +
+validation of all main tools at scale on real projects. **No breaking
+code changes** — composite weights preserved, API stable.
+
+### Honest corrections of cycles 16-20
+
+- **cycle 16 v1+v2** : cold-start AST similarity signal REJECTED (verdict
+  confirmed across v1 sample N=14 + v2 cold-start N=50). Root cause:
+  AST node types uniform across Python files → Jaccard ~0.6-0.8
+  irrespective of file. No discrimination buggy vs non-buggy.
+- **cycle 17** : `forge --locate` at scale REJECTED for user-facing
+  scope. 6.7% top30 on BugsInPy PRE_BUG; SBFL ranks system files
+  without path filter. Stays in research mode.
+- **cycle 18 v1 INVALIDATED** : verdict 0% stages_complete was testing
+  the `--weeks` system-date bug, not shield logic. Cycle 18 v2 (shield
+  on HEAD actuel) gives honest verdict: 11/11 stages_complete on
+  active projects (≥3 commits in 4-week window), 0/9 on dormant.
+- **cycle 19 v1 RECLASSED** from NON to **AMBIGU**. v1 verdict was
+  cherry-pick on panel_reference (-16.7 pts) ignoring train+holdout
+  (+2.3 pts on N=131). Cycle 19 v2 4-dimension analysis shows:
+  populations partially disjoint (50% overlap only), heterogeneity
+  per-project (cookiecutter +25 / ansible -13), help% 57.3% TH / 50% REF
+  → outside scenario A (≤25%) and B (≥75%) → C_AMBIGU.
+- **cycle 20 v1** (2 tmpdirs synthétiques) **REPLACED** by cycle 20 v2
+  (30 real cases on 5 active projects). 6/6 main tools 100% ratio_ok
+  with graceful exits.
+
+### Tools validated production (cycle 20 v2)
+
+`gen-props`, `minimize`, `snapshot`, `watch`, `bisect`, `flaky` —
+100% ratio_ok on 30 real cases (5 projects: fastapi, luigi, black,
+ansible, scrapy). PARTIAL classifications = graceful handling
+(no-public-function / nothing-to-minimize / verifying-early-exit).
+
+### Composite 6-signal preserved (cycle 19 v2 conservatism)
+
+Default weights `(kalman 0.20, wavelet 0.15, crash 0.20, coupling 0.15,
+churn 0.15, complexity 0.15)` unchanged. Ablation drop kalman+wavelet
+verdict ambiguous (TH helps +2.3 pts, REF hurts -16.7 pts, populations
+partially disjoint). Keep 6-signal = conservative until cycle 21+
+clarifies.
+
+### `forge --predict` remains recommended primary
+
+3rd cycle confirmation: 54-71% precision@10 holdout on E7-filtered
+scope across cycles 11 v2, 13 v4, 15 v6. `forge --carmack` stays
+research mode.
+
+### Documentation
+
+- README "Honest Limits v7" (replaces v6 cycle 15) with full cycles
+  11-20 findings table and reproducibility links
+- BUGS.md created with BUG-014 entry on `--weeks` system date issue
+- All cycle v2 final reports linked from README
+
+### Known bug — to fix v2.1
+
+`forge --shield` / `forge --carmack` `--weeks N` use system date, not
+PRE_BUG reference date. Patch `--weeks-from REF_DATE` planned. See
+BUGS.md BUG-014.
+
+### No breaking changes
+
+- `forge.py` code unchanged from 1.3.1
+- API stable, CLI flags unchanged, config schema unchanged
+- Composite default weights unchanged
+
 ## [1.3.1] - 2026-05-11
 
 Doc-only patch. Updates README "Honest Limits" v5 → v6 with cycle 15
