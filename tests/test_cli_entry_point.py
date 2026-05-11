@@ -270,12 +270,14 @@ class TestCycle4H2VersionFlag:
             f"forge --version should exit 0; got {result.returncode}\n"
             f"stderr: {result.stderr}"
         )
-        # Match `forge-shield <semver>` OR `forge-shield 0.0.0-dev`.
+        # Match `forge-shield <semver>` (with optional PEP 440 prerelease
+        # suffix like rc1, a1, b2) OR `forge-shield 0.0.0-dev`.
         # We don't pin the exact version (would drift each release);
         # just that the format is stable and machine-parseable.
         out = result.stdout.strip()
         assert re.match(
-            r"^forge-shield (\d+\.\d+\.\d+|0\.0\.0-dev|unknown)$", out
+            r"^forge-shield (\d+\.\d+\.\d+(?:rc\d+|a\d+|b\d+)?|0\.0\.0-dev|unknown)$",
+            out,
         ), (
             f"--version output didn't match expected pattern;\n"
             f"got: {out!r}"
