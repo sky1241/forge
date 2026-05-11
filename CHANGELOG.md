@@ -8,6 +8,51 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.2.5] - 2026-05-11
+
+Doc-only patch. Updates **"Honest Limits"** section in README with
+cycle 13 v4 case-study verdict (E7-filtered, N=46 effective, **1/3 OUI**).
+Supersedes cycle 12 v3 verdict (0/3 OUI on N=37 cold-start panel).
+
+### Changed
+- README "Honest Limits" section updated v3 → v4:
+  - **C1 OUI ✓ FIRST TIME** in 4 cycles: Fisher p=0.0488 (forge 7/25 vs random 1/25)
+  - C2 NON: precision@10 = 0.28, Wilson CI [0.143, 0.476]
+  - C3 NON: delta AUC holdout −0.021 (calibration dégrade)
+  - E7 filter requires ≥3 bugfix commits on change_file before PRE_BUG
+  - Corrects cycle 12 cold-start tautologic verdict
+
+- **Major finding documented**: `forge --predict` (churn-only) BEATS
+  `forge --carmack` (5-signal composite) 64% vs 28% top10 on train,
+  71% vs 52% on holdout. The simpler predictor wins on E7-filtered
+  panel. Multi-signal composite likely dilutes pure churn signal.
+
+- **Calibration convergence v3+v4 on coupling-dominant**: ML calibration
+  at N≥20 converges towards coupling 0.45-0.59 dominant (vs heuristic
+  0.15). Suggests the heuristic mis-weights the strongest non-history
+  signal.
+
+- **Cold-start blind spot acknowledged**: forge --carmack history-based,
+  fails on files with 0 prior bugfixes. Cycle 14 (in prep) will add
+  complexity-based cold-start signal (McCabe + Halstead, Menzies 2007).
+
+### Unchanged (intentional)
+- **Default heuristic weights unchanged**: `(kalman 0.20, wavelet 0.15,
+  crash 0.25, coupling 0.15, churn 0.25)`. Calibration not robust
+  enough at N=25 to commit a swap.
+- No code change in `forge.py`. Pure doc patch with v4 verdict.
+
+### Recommended usage (added to README)
+- `forge --predict` for production defect ranking (validated 64-71% top10)
+- `forge --carmack` as research mode (composite under investigation)
+- `forge --mutate` for AST-aware mutation testing (validated cycle 8)
+- `forge --modularity` for architecture monitoring
+
+### Cycle 14 in preparation
+Cold-start complexity module (McCabe + Halstead) being implemented
+in branche `feat/cold_start_complexity`. Will land as `v1.3.0-rc1`
+when CI greens.
+
 ## [1.2.4] - 2026-05-11
 
 Doc-only patch. Updates **"Honest Limits"** section in README with
