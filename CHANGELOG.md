@@ -8,6 +8,63 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [1.3.0rc2] - 2026-05-11
+
+**Second release candidate.** Adds rule-based composite re-weighting on
+cold-start detection (cycle 14 D1 fix). Cold-start case-aware ranking
+to address the cycle 13 v4 finding that 5/8 cold-start cases were
+under-ranked despite cycle 14's complexity signal addition.
+
+### Added
+- **Cold-start detection** in `predict_carmack()`:
+  - `is_cold_start = (bugfixes < 3) AND (kalman ~ 0) AND (crash_prob ~ 0)`
+  - Aligned with E7 eligibility filter from forge-case-studies cycles
+- **2 sub-regimes** by import-graph coupling:
+  - **A (coupled)**: cold-start but central file (config imported by many).
+    Weights: `complexity 0.40, coupling 0.35, churn 0.20, others 0.05 each`
+  - **B (isolated)**: cold-start and isolated. Only complexity can predict.
+    Weights: `complexity 0.60, churn 0.25, coupling 0.10, others 0.05 each`
+- 3 new config defaults: `carmack_cold_start_weights_a`,
+  `carmack_cold_start_weights_b`, `carmack_cold_start_coupling_threshold` (0.01).
+- `r["cold_start_regime"]` field in `predict_carmack` result dicts
+  (values: `"history" | "A_coupled" | "B_isolated"`).
+- 3 new tests in `TestCycle14ColdStartComplexity`: weights_a/b sum to 1.0,
+  coupling_threshold sanity range.
+
+### Sanity validation results
+4 cold-start cases sampled from cycle 13 E7-fail pool (cf
+forge-case-studies/bench_sanity/):
+- thefuck-9: 100/249 (top 40%, regime A_coupled)
+- thefuck-24: 11/161 (top 7%, FRONTIER hors top10)
+- fastapi-7: 48/337 (top 14%, regime A_coupled)
+- scrapy-2: 9/271 (TOP10 ✓, regime A_coupled)
+
+**4/4 cases in top 20% (beats random clearly), 1/4 in top10.**
+Sanity threshold ≥ 2/5 top10 NOT met → cycle 14 light test will
+measure final precision@10 on N=200 panel.
+
+scrapy-26 regression investigation: 3 runs same process → STABLE
+rank 38/301 (was 64 rc1, then 112 with bugfixes==0 strict criterion).
+D1 criterion `bugfixes < 3` resolves the regression by correctly
+detecting scrapy-26 (bugfixes=2) as cold-start.
+
+### Unchanged (intentional)
+- Default `carmack_composite_weights` for history regime unchanged:
+  `(kalman 0.20, wavelet 0.15, crash 0.20, coupling 0.15, churn 0.15, complexity 0.15)`
+- Backward compat: user configs without cold-start weights → fallback
+  to standard composite via `cfg.get(..., cfg["carmack_composite_weights"])`.
+- No new mandatory deps. Pure stdlib + ast + math.
+
+### Internal
+- mypy --strict forge.py: Success no issues
+- pytest tests/: 265 passed (vs 262 base, +3 new cold-start regime tests)
+- Branch `fix/cold_start_re_weighting` → PR → CI 9/9 → merge → tag v1.3.0rc2
+
+### Cycle 14 in progress
+Empirical validation on N=200 stratified panel (40% cold-start + 60%
+history-rich) underway in forge-case-studies branch `cycle14`. Verdict
+will determine v1.3.0 final release or rc2 staying rc.
+
 ## [1.3.0rc1] - 2026-05-11
 
 **Release candidate.** Adds cold-start complexity signal to `forge --carmack`

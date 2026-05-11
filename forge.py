@@ -172,6 +172,24 @@ FORGE_CONFIG_DEFAULTS = {
         "kalman": 0.20, "wavelet": 0.15, "crash": 0.20,
         "coupling": 0.15, "churn": 0.15, "complexity": 0.15,
     },
+    # Cycle 14 fix: rule-based composite re-weighting on cold-start
+    # detection (bugfixes=0 AND kalman ≈ 0 AND crash ≈ 0). Two
+    # sub-regimes by import-graph coupling:
+    # - A: cold-start but coupled (file is new but central — e.g. config
+    #   imported by many modules). Use coupling as anchor signal.
+    # - B: cold-start AND isolated. Only complexity can predict.
+    # Heuristic, override via .forge/config.json when sub-régime-tuned.
+    "carmack_cold_start_weights_a": {
+        "complexity": 0.40, "coupling": 0.35, "churn": 0.20,
+        "kalman": 0.017, "wavelet": 0.017, "crash": 0.016,
+    },
+    "carmack_cold_start_weights_b": {
+        "complexity": 0.60, "churn": 0.25, "coupling": 0.10,
+        "kalman": 0.017, "wavelet": 0.017, "crash": 0.016,
+    },
+    # Coupling threshold (in normalized [0,1] space) above which a
+    # cold-start file is considered "connected" (sub-regime A).
+    "carmack_cold_start_coupling_threshold": 0.01,
     # In --full-cycle, files smaller than this LOC are routed through
     # `--mutate` automatically. Bigger files require the user to invoke
     # `--mutate <path>` explicitly, since mutation testing on a 2k-line
@@ -4237,15 +4255,37 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
     # .forge/config.json `carmack_composite_weights` to tune per repo.
     # Cycle 14: 6th signal "complexity" (McCabe + Halstead) added for
     # cold-start cases; default weight 0.15 (5 history-based + 1 cold-start).
+    # Cycle 14 fix: per-file rule-based re-weighting on cold-start detection
+    # (bugfixes=0 AND kalman near 0 AND crash near 0). 2 sub-regimes by
+    # coupling: A (coupled) boosts coupling+complexity, B (isolated) boosts
+    # complexity only.
     cw = cfg["carmack_composite_weights"]
+    cw_a = cfg.get("carmack_cold_start_weights_a", cw)
+    cw_b = cfg.get("carmack_cold_start_weights_b", cw)
+    coupling_threshold = cfg.get("carmack_cold_start_coupling_threshold", 0.01)
+
     for i, r in enumerate(results):
+        # Cycle 14 D1: aligned with E7 filter (< 3 bugfix commits =
+        # cold-start blind). Was bugfixes == 0 (too strict, missed files
+        # with 1-2 bugfix history where kalman/crash are still ~0).
+        is_cold_start = (
+            r.get("bugfixes", 0) < 3
+            and abs(r.get("kalman", 0.0)) < 1e-6
+            and abs(r.get("crash_prob", 0.0)) < 1e-6
+        )
+        if is_cold_start:
+            w = cw_a if coupling_n[i] > coupling_threshold else cw_b
+            r["cold_start_regime"] = "A_coupled" if coupling_n[i] > coupling_threshold else "B_isolated"
+        else:
+            w = cw
+            r["cold_start_regime"] = "history"
         r["score"] = (
-            cw["kalman"] * kalman_n[i] +
-            cw["wavelet"] * wave_n[i] +
-            cw["crash"] * crash_n[i] +
-            cw["coupling"] * coupling_n[i] +
-            cw["churn"] * churn_n[i] +
-            cw.get("complexity", 0.0) * complexity_n[i]
+            w.get("kalman", 0.0) * kalman_n[i] +
+            w.get("wavelet", 0.0) * wave_n[i] +
+            w.get("crash", 0.0) * crash_n[i] +
+            w.get("coupling", 0.0) * coupling_n[i] +
+            w.get("churn", 0.0) * churn_n[i] +
+            w.get("complexity", 0.0) * complexity_n[i]
         )
 
     results.sort(key=lambda x: x["score"], reverse=True)

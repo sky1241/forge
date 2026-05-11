@@ -4202,3 +4202,25 @@ class TestCycle14ColdStartComplexity:
         # All weights sum to ~1.0
         total = sum(cw.values())
         assert abs(total - 1.0) < 1e-6, f"weights sum {total} != 1.0"
+
+    def test_cold_start_weights_a_default_sums_to_one(self) -> None:
+        """Sub-regime A (cold-start coupled): weights sum to 1.0."""
+        cwa = forge.FORGE_CONFIG_DEFAULTS["carmack_cold_start_weights_a"]
+        total = sum(cwa.values())
+        assert abs(total - 1.0) < 1e-6, f"sub-regime A weights sum {total} != 1.0"
+        # Coupling and complexity should be the two largest
+        assert cwa["complexity"] >= 0.35
+        assert cwa["coupling"] >= 0.30
+
+    def test_cold_start_weights_b_default_sums_to_one(self) -> None:
+        """Sub-regime B (cold-start isolated): weights sum to 1.0, complexity dominant."""
+        cwb = forge.FORGE_CONFIG_DEFAULTS["carmack_cold_start_weights_b"]
+        total = sum(cwb.values())
+        assert abs(total - 1.0) < 1e-6, f"sub-regime B weights sum {total} != 1.0"
+        # Complexity dominant (≥ 0.55)
+        assert cwb["complexity"] >= 0.55
+
+    def test_cold_start_coupling_threshold_exists(self) -> None:
+        thresh = forge.FORGE_CONFIG_DEFAULTS["carmack_cold_start_coupling_threshold"]
+        assert isinstance(thresh, (int, float))
+        assert 0.0 < thresh < 0.5  # plausible range
