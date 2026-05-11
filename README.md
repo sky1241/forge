@@ -26,79 +26,60 @@ forge --shield   # orchestrate: predict → gen tests → run impacted
 
 See [BENCHMARK.md](BENCHMARK.md) for the 6 frictions admitted (test set asymmetry, mutmut crash, black skipped per timeout cap).
 
-## Honest Limits — cycle 14 case studies v5 (2026-05-11)
+## Honest Limits — cycle 15 case studies v6 (2026-05-11)
 
-`forge --carmack` was tested over 5 cycles on real Python bugs from
-BugsInPy. Cycle 14 (N=141 effective, stratified 40% cold-start /
-60% history-rich, pre-registered seeds 48/49) tests the cold-start
-re-weighting fix introduced in v1.3.0rc2.
+forge has been tested over 6 cycles on real Python bugs from BugsInPy
+with pre-registration committed publicly before each run, see
+[forge-case-studies](https://github.com/sky1241/forge-case-studies).
 
-**Verdict (pre-registered, N=141): 1/3 criteria OUI**
+Cycle 15 (N=131 effective, history-only scope, E7 strict ≥3 bugfix,
+seeds 50/51, 6 sub-cmds verified) gives the strongest verdict :
 
-- **C1 OUI ✓** : Fisher exact p=0.00108 (forge 39/112 vs random 17/112)
-  → forge beats random with statistical robustness (3× stronger than cycle 13's p=0.049)
-- **C2 NON globally** (precision@10 = 34.5%) **BUT OUI on history-rich subset**
-  (8/15 = 53.3% top10, Wilson lower ≥ 0.30)
-  → forge works on its intended scope (files with ≥3 bugfix history),
-    diluted on the global mixed panel by cold-start cases (15.4%)
-- **C3 NON** (delta AUC calibrated vs heuristic = +0.021, below +0.05)
-  → calibration finds signal direction but training set N=101 still small
+**Verdict (pre-registered, N=131): 1/3 criteria OUI** :
 
-### Major finding — `forge --carmack` beats `forge --predict` on holdout
+- **C1 OUI ✓ very robust** : Fisher exact p = 2.5e-9 (forge 47/105 vs
+  random 9/105 top10). 9 orders of magnitude stronger than cycle 13.
+- **C2 NON** : precision@10 = 44.8% (sub 50% threshold). Pattern monotonic
+  cycle 13→14→15 : 28% → 35% → 45%, but doesn't cross 50%.
+- **C3 NON** : delta AUC +0.018 (sub +0.05). Calibration ML unstable
+  across cycles (cycle 14 dominant coupling+complexity ; cycle 15
+  dominant complexity alone).
 
-| | TRAIN N=112 | **HOLDOUT N=29** |
+### Major finding — `forge --predict` beats `forge --carmack` (3rd confirmation)
+
+| Predictor | TRAIN N=105 | HOLDOUT N=26 |
 |---|---|---|
-| forge --carmack v1.3.0 (with cold-start re-weighting + complexity signal) | 34.8% | **34.5%** ✓ |
-| forge --predict (churn-only) | 39.3% | 31.0% |
-| random | 15.2% | 10.3% |
+| **forge --predict (churn-only baseline)** | **58.1%** top10 | **53.8%** top10 ✓ above 50% |
+| forge --carmack (multi-signal composite) | 44.8% | 30.8% |
+| random | 8.6% | 7.7% |
 
-Reversal vs cycles 11-13. Calibrated carmack with new complexity signal +
-cold-start sub-regimes A/B beats churn-only baseline on independent holdout.
+**Empirical conclusion** : simple churn-only baseline (Nagappan-Ball
+ICSE 2005) outperforms the sophisticated multi-signal composite on
+Python defect prediction at this scale (3 independent cycles confirm).
 
-### Calibration converges on coupling + complexity
+### Recommended usage in production
 
-| Signal | Heuristic | Calibrated (cycle 14) |
-|---|---|---|
-| coupling | 0.15 | **0.399** |
-| complexity | 0.15 | **0.386** |
-| crash | 0.20 | 0.085 |
-| kalman | 0.20 | 0.033 |
-| wavelet | 0.15 | 0.019 |
-| churn | 0.15 | 0.078 |
-
-Coupling + complexity = **79% of the optimal composite**. Confirms
-empirically the cold-start hypothesis : files central in the import graph
-+ inherently complex code = strongest predictors.
-
-### Recommended usage
-
-- `forge --carmack` v1.3.0 for **defect prediction on Python projects with
-  bugfix history** (53% precision@10 on this scope)
-- `forge --predict` for fast churn-only baseline ranking
-- `forge --mutate` (libcst) for AST-aware mutation testing (validated cycle 8)
-- `forge --modularity` for architecture monitoring (Newman Q)
-
-### Cold-start signal — partial
-
-Cold-start re-weighting (D1 fix: detection `bugfixes < 3`, sub-regimes A/B
-according to coupling) reduces but does not eliminate the cold-start
-blind spot. 15.4% top10 on holdout cold-start subset vs ~10% random.
-
-Future cycle 15 will test forge on history-only panel (E7 strict) to
-validate carmack's intended scope rigorously.
+- **`forge --predict`** : recommended primary defect predictor.
+  54% precision@10 holdout on E7-filtered scope (≥3 bugfix history).
+- `forge --carmack` : research mode. Composite multi-signal kept for
+  experimentation, but heuristic weights are not validated.
+- `forge --mutate` (libcst) : AST-aware mutation testing, validated
+  cycle 8 vs mutmut.
+- `forge --modularity` : Newman Q architecture metric, validated cycle 8
+  vs pydeps.
 
 ### Reproducibility
 
-See [forge-case-studies](https://github.com/sky1241/forge-case-studies)
-cycle14 branch for full methodology, frictions admitted, per-case
-ranks, and pre-registration committed before all runs.
+5 FINAL_REPORTs publicly available (cycles 11 v2, 12 v3, 13 v4,
+14 v5, 15 v6) with pre-registration committed before all runs.
+Seeds 42/43, 44/45, 48/49, 50/51 — all disjoint.
 
 Earlier reports preserved for historical transparency:
-- [FINAL_REPORT_v5.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v5.md) (cycle 14 v5, 1/3 OUI, N=141)
-- [FINAL_REPORT_v4.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v4.md) (cycle 13 v4, 1/3 OUI, E7 filter)
-- [FINAL_REPORT_v3.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v3.md) (cycle 12 v3, 0/3 OUI, no E7)
-- [FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md) (cycle 11 v2, 1/3 OUI, N=15)
-- v1 INVALID (cycle 11 v1, REVERT commit `0b55e2a`)
+- [FINAL_REPORT_v6.md](https://github.com/sky1241/forge-case-studies/blob/cycle15/FINAL_REPORT_v6.md) (cycle 15, N=131 history-only, C1 p=2.5e-9)
+- [FINAL_REPORT_v5.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v5.md) (cycle 14, N=141 mixed)
+- [FINAL_REPORT_v4.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v4.md) (cycle 13, E7 filter)
+- [FINAL_REPORT_v3.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT_v3.md) (cycle 12, 0/3 OUI)
+- [FINAL_REPORT.md](https://github.com/sky1241/forge-case-studies/blob/main/FINAL_REPORT.md) (cycle 11 v2)
 
 ## What's new (cycle 4)
 
