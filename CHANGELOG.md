@@ -8,6 +8,54 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [2.1.0] - 2026-05-12
+
+Three fixes shipping cycle 21A. **No breaking changes** — all new
+flags are opt-in OR default-on with explicit `--include-*` override.
+
+### Fixed
+- **BUG-014** — `forge --carmack`/`--shield` `--weeks N` no longer
+  short-circuits on historical commits or dormant projects. Add new
+  flag `--weeks-from <ISO_DATE_OR_SHA>` to anchor history window:
+  - `--weeks-from 2020-01-15` → ISO date anchor
+  - `--weeks-from HEAD~10` / `--weeks-from v1.2.3` → git ref anchor
+    (resolved via `git show -s --format=%cI`)
+  - Default behavior (system date) preserved when flag absent
+  - Threaded through `predict_carmack` + `run_shield` stages
+
+### Added — `--locate` system-library path filter
+- New flag `--exclude-system-libs` (default ON in v2.1.0). Skips
+  `site-packages/*`, `*/python3.X/lib/*`, `.venv/*`, `venv/*`,
+  `env/*`, `.tox/*` from SBFL fault-localization ranking.
+- `--include-system-libs` restores v2.0.0 legacy behavior (rank
+  everything pytest/pluggy traversed).
+- Closes cycle 17 finding: `--locate` ranked pytest/_pytest/pluggy
+  files above user code without filter.
+
+### Improved — `--shield` warning verbosity on short-circuit
+- When carmack stage returns 0 commits in window, shield now prints:
+  ```
+  [SHIELD WARNING] Downstream stages (gen-props, fast-deep) SKIPPED.
+  [SHIELD HINT] Try one of:
+      forge --shield --weeks 52     (widen activity window)
+      forge --shield --weeks-from <ISO_DATE_OR_SHA>  (historical ref)
+      git log --oneline -5          (check recent commit activity)
+  ```
+- Closes cycle 18 v2 finding: silent skip on dormant projects.
+
+### Validated at scale (cycle 21B)
+- 10 auxiliary tools sanity-tested on 5 active projects:
+  `--anomaly`, `--heatmap`, `--baseline/--diff`, `--init/--add/--close`,
+  `--install-hook/--uninstall-hook`, `--watch`, `--full-cycle`,
+  `--predict + --carmack`, `--incremental-mutate`, `--flaky-dtw`.
+  See FINAL_REPORT_v13 on forge-case-studies.
+
+### Tests
+- 18 new tests in `TestCycle21LocatePathFilter` (8),
+  `TestCycle21ShieldWarning` (3), `TestCycle21WeeksFrom` (7).
+- mypy --strict forge.py: Success
+- pytest tests/: 283 passed
+
 ## [2.0.0] - 2026-05-11
 
 Major version bump for **honest correction** of cycles 16-20 verdicts +
