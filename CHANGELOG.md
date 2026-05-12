@@ -8,6 +8,35 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [2.1.1] - 2026-05-12
+
+Doc-only patch. End-of-investigation marker for the cycles 11→24
+scientific validation program.
+
+### Documentation
+- README rewritten for clarity: removed duplicate "Honest limits" section,
+  removed obsolete "What's new (cycle 4)" block, fixed incorrect composite
+  weights citation in honest-limits paragraph.
+- New structure: Install → Quickstart → Tools → Comparison →
+  Scientific validation → Internals → Honest limits → Roadmap.
+- Added cycles 22-24 findings to scientific validation section:
+  - Cycle 22: incremental_mutate retest + kalman/wavelet deep analysis
+    (kalman 56% zeros BUT wavelet 7x discriminative buggy/non-buggy ratio)
+  - Cycle 23: NO DROP investigation — 6/6 signals useful solo (≥2x random)
+  - Cycle 24: repondération + kalman extraction fix benchmark = NEUTRAL,
+    v2.1.0 weights kept
+
+### No code changes
+- `forge.py` unchanged from v2.1.0
+- API stable, CLI flags unchanged, config schema unchanged
+- Composite default weights unchanged (cycle 24 NEUTRAL → kept v2.1.0)
+
+### Project status
+- v2.1.0 production-stable, all main + auxiliary tools validated at scale
+- Cycles 11→24 investigation program complete
+- Roadmap v2.2+: Hawkes process for count data, empirical cross-validation
+  calibration, larger panel_reference
+
 ## [2.1.0] - 2026-05-12
 
 Three fixes shipping cycle 21A. **No breaking changes** — all new
