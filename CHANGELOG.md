@@ -8,6 +8,23 @@ All notable changes to forge are documented here. Format follows
 
 _Nothing yet. See [GitHub issues](https://github.com/sky1241/forge/issues)._
 
+## [2.1.2] - 2026-05-12
+
+Doc-only patch. README rewritten for portfolio / discoverability.
+
+### Documentation
+- README portfolio rewrite: clearer pitch ("validated across 14 pre-registered
+  scientific cycles"), explicit headline finding (`--predict` beats `--carmack`
+  empirically), 60-second tour with sample output, sub-commands grouped by
+  usage (Prediction / Orchestration / Quality / Ops).
+- Honest limits preserved verbatim. All claims still backed by FINAL_REPORTs
+  on forge-case-studies.
+
+### Unchanged
+- No code changes. `forge.py` identical to v2.1.1.
+- `mypy --strict` clean, 292 tests pass.
+- All v2.1.0/v2.1.1 features preserved.
+
 ## [2.1.1] - 2026-05-12
 
 Doc-only patch. End-of-investigation marker for the cycles 11→24
