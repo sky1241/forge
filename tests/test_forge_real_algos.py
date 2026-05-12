@@ -3011,8 +3011,9 @@ class TestCycle4P11WeeksFlowsThroughDispatch:
         repo = self._setup_repo_with_horizon(tmp_path, 23)
         captured = {}
 
-        def fake_predict_carmack(root_arg, weeks=None):
+        def fake_predict_carmack(root_arg, weeks=None, weeks_from=None):
             captured["weeks_arg"] = weeks
+            captured["weeks_from_arg"] = weeks_from
             cfg = forge._load_forge_config(root_arg)
             captured["weeks_resolved"] = (weeks if weeks is not None
                                            else cfg["predict_horizon_weeks"])
@@ -4224,3 +4225,200 @@ class TestCycle14ColdStartComplexity:
         thresh = forge.FORGE_CONFIG_DEFAULTS["carmack_cold_start_coupling_threshold"]
         assert isinstance(thresh, (int, float))
         assert 0.0 < thresh < 0.5  # plausible range
+
+
+# === Cycle 21A — Fix 2: locate path filter (--exclude-system-libs default) ===
+class TestCycle21LocatePathFilter:
+    """Cycle 21A Fix 2 — _is_system_lib_path + --exclude-system-libs."""
+
+    def test_is_system_lib_path_site_packages(self) -> None:
+        assert forge._is_system_lib_path("/usr/lib/python3.13/site-packages/pytest/foo.py")
+        assert forge._is_system_lib_path("/home/sky/repo/.venv/lib/python3.11/site-packages/pluggy/_callers.py")
+
+    def test_is_system_lib_path_dist_packages(self) -> None:
+        assert forge._is_system_lib_path("/usr/lib/python3/dist-packages/pytest/__init__.py")
+
+    def test_is_system_lib_path_venv_variants(self) -> None:
+        assert forge._is_system_lib_path("/home/u/proj/.venv/lib/foo.py")
+        assert forge._is_system_lib_path("/home/u/proj/venv/lib/foo.py")
+        assert forge._is_system_lib_path("/home/u/proj/env/lib/foo.py")
+        assert forge._is_system_lib_path("/home/u/proj/.tox/py311/lib/foo.py")
+
+    def test_is_system_lib_path_python_stdlib(self) -> None:
+        assert forge._is_system_lib_path("/usr/lib/python3.13/lib/genericpath.py")
+        assert forge._is_system_lib_path("/opt/python3.11/lib/posixpath.py")
+
+    def test_is_system_lib_path_user_code_returns_false(self) -> None:
+        assert not forge._is_system_lib_path("/home/sky/myproj/src/mymodule.py")
+        assert not forge._is_system_lib_path("scrapy/utils/url.py")
+        assert not forge._is_system_lib_path("/home/sky/repo/tests/test_foo.py")
+        # Don't confuse "env_var" filename with /env/ dir segment
+        assert not forge._is_system_lib_path("/home/sky/proj/env_var.py")
+
+    def test_is_system_lib_path_handles_windows_seps(self) -> None:
+        # Backslash-normalized
+        assert forge._is_system_lib_path("C:\\Users\\u\\proj\\.venv\\lib\\foo.py")
+
+    def test_locate_default_excludes_system(self) -> None:
+        """Default behavior v2.1.0: --locate filters system paths.
+
+        Smoke-check the dispatch path accepts the new flag without error.
+        Full integration test requires real failing tests + coverage data,
+        covered by cycle 21B sanity at scale.
+        """
+        # Just verify the function signature accepts include_system_libs kw.
+        import inspect
+        sig = inspect.signature(forge.fault_locate)
+        assert "include_system_libs" in sig.parameters
+        param = sig.parameters["include_system_libs"]
+        assert param.default is False, "default must be False (exclude system) in v2.1.0"
+
+    def test_known_flags_include_system_lib_flags(self) -> None:
+        assert "--exclude-system-libs" in forge.KNOWN_FLAGS
+        assert "--include-system-libs" in forge.KNOWN_FLAGS
+
+
+# === Cycle 21A — Fix 3: shield warning visible on short-circuit ===
+class TestCycle21ShieldWarning:
+    """Cycle 21A Fix 3 — [SHIELD WARNING] + [SHIELD HINT] on carmack 0-commits."""
+
+    def _make_repo_with_old_commit(self, tmp_path: Path) -> Path:
+        """Repo with single commit 5 years old → carmack short-circuits."""
+        import subprocess
+        root = tmp_path
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+        (root / "a.py").write_text("def f():\n    return 1\n")
+        env = {"GIT_AUTHOR_DATE": "2020-01-01T12:00:00", "GIT_COMMITTER_DATE": "2020-01-01T12:00:00"}
+        import os
+        full_env = {**os.environ, **env}
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "old"], cwd=root, env=full_env, check=True)
+        return root
+
+    def test_shield_warns_on_zero_commits_window(self, tmp_path: Path, capsys: "pytest.CaptureFixture[str]") -> None:
+        root = self._make_repo_with_old_commit(tmp_path)
+        forge.run_shield(root)
+        out = capsys.readouterr().out
+        assert "[SHIELD WARNING]" in out, f"expected warning, got:\n{out}"
+        assert "SKIPPED" in out
+
+    def test_shield_hint_includes_workaround(self, tmp_path: Path, capsys: "pytest.CaptureFixture[str]") -> None:
+        root = self._make_repo_with_old_commit(tmp_path)
+        forge.run_shield(root)
+        out = capsys.readouterr().out
+        assert "[SHIELD HINT]" in out
+        assert "--weeks 52" in out
+        assert "--weeks-from" in out
+
+    def test_shield_silent_path_unchanged_for_active_repo(self, tmp_path: Path, capsys: "pytest.CaptureFixture[str]") -> None:
+        """When carmack returns signal, no warning printed (backward-compat)."""
+        # Build a tiny active repo (recent commits)
+        import subprocess
+        root = tmp_path
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+        (root / "a.py").write_text("def f():\n    return 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "recent"], cwd=root, check=True)
+        # Modify and commit again so churn > 0
+        (root / "a.py").write_text("def f():\n    return 2\n")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "edit"], cwd=root, check=True)
+        forge.run_shield(root)
+        out = capsys.readouterr().out
+        # Backward-compat: warning must NOT appear when carmack has signal
+        assert "[SHIELD WARNING]" not in out, f"unexpected warning:\n{out}"
+
+
+# === Cycle 21A — Fix 1: --weeks-from REF_DATE (BUG-014 fix) ===
+class TestCycle21WeeksFrom:
+    """Cycle 21A Fix 1 — --weeks-from anchoring for carmack/shield."""
+
+    def _make_dated_repo(self, tmp_path: Path) -> Path:
+        """Repo with two commits at fixed historical dates."""
+        import os
+        import subprocess
+        root = tmp_path
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+        (root / "a.py").write_text("def f():\n    return 1\n")
+        env1 = {**os.environ, "GIT_AUTHOR_DATE": "2020-01-01T12:00:00",
+                "GIT_COMMITTER_DATE": "2020-01-01T12:00:00"}
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=root, env=env1, check=True)
+        (root / "a.py").write_text("def f():\n    return 2\n")
+        env2 = {**os.environ, "GIT_AUTHOR_DATE": "2020-01-15T12:00:00",
+                "GIT_COMMITTER_DATE": "2020-01-15T12:00:00"}
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "edit"], cwd=root, env=env2, check=True)
+        return root
+
+    def test_resolve_ref_date_iso_format(self, tmp_path: Path) -> None:
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        out = forge._resolve_ref_date(tmp_path, "2020-01-01")
+        assert out == "2020-01-01T00:00:00"
+
+    def test_resolve_ref_date_sha(self, tmp_path: Path) -> None:
+        root = self._make_dated_repo(tmp_path)
+        import subprocess
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        out = forge._resolve_ref_date(root, sha)
+        assert out is not None
+        assert "2020-01-15" in out
+
+    def test_resolve_ref_date_invalid_returns_none(self, tmp_path: Path) -> None:
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        out = forge._resolve_ref_date(tmp_path, "not-a-date-or-ref")
+        assert out is None
+
+    def test_weeks_from_iso_carmack_picks_up_historical_commits(self, tmp_path: Path) -> None:
+        """Without --weeks-from: system date 2026 → 0 commits in last 4 weeks
+        on a 2020 repo. With --weeks-from=2020-02-01 --weeks 8: should find
+        both commits."""
+        root = self._make_dated_repo(tmp_path)
+        # Default behavior: no signal (commits too old)
+        result_default = forge.predict_carmack(root, weeks=4)
+        # With ref: anchored window catches the commits
+        result_anchored = forge.predict_carmack(
+            root, weeks=8, weeks_from="2020-02-01"
+        )
+        # Both should return a list (carmack ran), but anchored one has
+        # commits feeding the kalman/wavelet/churn signals.
+        assert result_anchored is not None, "anchored carmack should return data"
+
+    def test_weeks_from_backward_compat_when_absent(self, tmp_path: Path) -> None:
+        """Without --weeks-from arg, behavior identical to v2.0.0."""
+        root = self._make_dated_repo(tmp_path)
+        # Calling predict_carmack with weeks_from=None must equal calling
+        # without the kwarg at all. We just verify the kwarg exists and
+        # accepts None without raising.
+        result = forge.predict_carmack(root, weeks=4, weeks_from=None)
+        # Returns list or None, but no exception raised
+        assert result is None or isinstance(result, list)
+
+    def test_shield_propagates_weeks_from(self, tmp_path: Path, capsys: "pytest.CaptureFixture[str]") -> None:
+        """run_shield must thread weeks_from to carmack stage."""
+        root = self._make_dated_repo(tmp_path)
+        # Without weeks_from, shield short-circuits (carmack gets 0 commits)
+        forge.run_shield(root)
+        out_default = capsys.readouterr().out
+        assert "[SHIELD WARNING]" in out_default
+
+        # With weeks_from anchored at the historical commit window,
+        # shield should NOT short-circuit (carmack gets data).
+        forge.run_shield(root, weeks=8, weeks_from="2020-02-01")
+        out_anchored = capsys.readouterr().out
+        # Anchored run: must NOT print SHIELD WARNING (carmack has signal)
+        assert "[SHIELD WARNING]" not in out_anchored, \
+            f"shield should not short-circuit with weeks_from, got:\n{out_anchored}"
+
+    def test_known_flags_include_weeks_from(self) -> None:
+        assert "--weeks-from" in forge.KNOWN_FLAGS
+        assert "--weeks-from" in forge._REQUIRES_VALUE

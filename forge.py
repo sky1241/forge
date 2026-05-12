@@ -855,13 +855,24 @@ def _has_test_for(root: Path, src_file: str) -> bool:
     return False
 
 
-def run_shield(root: Path, *, top_n: int = 3) -> None:
+def run_shield(
+    root: Path,
+    *,
+    top_n: int = 3,
+    weeks: int = 4,
+    weeks_from: str | None = None,
+) -> None:
     """Cycle 9 orchestrator with feedback chains.
 
     Stage 1 → 2 → 3 with Stage 1 output driving Stage 2 target.
     Prints a structured shield report. Read-only on the existing
     sub-commands (no behavior change to predict_carmack /
-    gen_props / run_fast_deep individually)."""
+    gen_props / run_fast_deep individually).
+
+    Cycle 21A Fix 1 — weeks_from is threaded through to carmack stage
+    so historical benchmarks (BugsInPy PRE_BUG commits) can run shield
+    without the system-date short-circuit (BUG-014).
+    """
     bar = "=" * 50
     print(f"\n{bar}")
     print(f"  SHIELD — orchestrated forge feedback chain")
@@ -869,9 +880,17 @@ def run_shield(root: Path, *, top_n: int = 3) -> None:
 
     # Stage 1: carmack risk ranking
     print(f"  [STAGE 1] predict_carmack — identify top-{top_n} risky files")
-    risky = predict_carmack(root, weeks=4)
+    risky = predict_carmack(root, weeks=weeks, weeks_from=weeks_from)
     if risky is None or not risky:
+        # Cycle 21A Fix 3 — visible warning when carmack short-circuits.
+        # Previously: silent skip of stages 2 & 3 → user thinks "shield
+        # broken" (cycle 18 v2 finding on dormant projects).
         print(f"    (no carmack signal — empty/shallow git history?)")
+        print(f"  [SHIELD WARNING] Downstream stages (gen-props, fast-deep) SKIPPED.")
+        print(f"  [SHIELD HINT] Try one of:")
+        print(f"      forge --shield --weeks 52     (widen activity window)")
+        print(f"      forge --shield --weeks-from <ISO_DATE_OR_SHA>  (historical ref)")
+        print(f"      git log --oneline -5          (check recent commit activity)")
         print(f"{bar}\n")
         return
     top_files = risky[:top_n]
@@ -1030,11 +1049,57 @@ def _parse_iso(s: str) -> datetime:
 GIT_NUMSTAT_FORMAT = "COMMIT %H %ae %aI %s"
 
 
-def _fetch_numstat_log(root: Path, since_weeks: int, paths: tuple[str, ...] = ("*.py",)) -> str:
-    """Run `git log --numstat --format=COMMIT %H %ae %aI %s --since=N weeks ago`
-    on the given path globs. Returns the raw stdout. Centralizing the call
-    so the format string is defined exactly once — every caller used to
-    repeat it verbatim, which silently drifted in the past."""
+def _resolve_ref_date(root: Path, ref_value: str) -> str | None:
+    """Cycle 21A Fix 1 — resolve --weeks-from value to an ISO datetime string.
+
+    Accepts:
+      - ISO date YYYY-MM-DD (e.g. "2020-01-01") → returned as-is plus T00:00:00
+      - Git ref (SHA, tag, branch) → resolved via `git show -s --format=%cI`
+        which returns the commit's committer date in strict ISO 8601.
+
+    Returns ISO-8601 string usable by `git log --until=<DATE>`, or None
+    if the input doesn't parse / git ref doesn't exist.
+    """
+    import re as _re
+    # ISO date pattern YYYY-MM-DD
+    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}", ref_value):
+        return ref_value + "T00:00:00"
+    # Otherwise treat as git ref
+    out = _run_git(root, "show", "-s", "--format=%cI", ref_value)
+    if out and "T" in out:
+        return out.strip()
+    return None
+
+
+def _fetch_numstat_log(
+    root: Path,
+    since_weeks: int,
+    paths: tuple[str, ...] = ("*.py",),
+    ref_date: str | None = None,
+) -> str:
+    """Run `git log --numstat --format=COMMIT %H %ae %aI %s` on the given
+    path globs. Returns the raw stdout.
+
+    Centralizing the call so the format string is defined exactly once —
+    every caller used to repeat it verbatim, which silently drifted in past.
+
+    Cycle 21A Fix 1 — when ref_date is provided (ISO 8601 string), the
+    history window is anchored to that date instead of the system clock:
+    `--until=<ref_date>` + `--since=<ref_date - N weeks>` via git's own
+    relative-date math. When ref_date is None (default), behavior is
+    identical to v2.0.0 (`--since=N weeks ago` relative to system date).
+    """
+    if ref_date:
+        # Anchor relative window to ref_date. Use YYYY-MM-DD date form
+        # (no timestamp) so git's `--since=<date> - N weeks` arithmetic
+        # parses correctly. ISO timestamp form (T00:00:00) silently
+        # returns 0 commits — git can't subtract from a timestamp.
+        ref_day = ref_date.split("T")[0] if "T" in ref_date else ref_date
+        return _run_git(
+            root, "log", "--numstat", f"--format={GIT_NUMSTAT_FORMAT}",
+            f"--until={ref_day}",
+            f"--since={ref_day} - {since_weeks} weeks", "--", *paths,
+        )
     return _run_git(
         root, "log", "--numstat", f"--format={GIT_NUMSTAT_FORMAT}",
         f"--since={since_weeks} weeks ago", "--", *paths,
@@ -3727,7 +3792,36 @@ def run_mutation(
 
 
 # === AXE 4: SPECTRUM-BASED FAULT LOCALIZATION / Ochiai (Abreu et al. 2007) ===
-def fault_locate(root: Path) -> bool:
+def _is_system_lib_path(path: str) -> bool:
+    """Return True if path looks like a system / venv / installed-package path.
+
+    Cycle 21A Fix 2: SBFL coverage tracks every file traversed, including
+    pytest/_pytest/pluggy in site-packages. Without filter, --locate ranks
+    those above user code (cycle 17 finding: 6.7% top30 BugsInPy because
+    suspects 1-30 were system files). Excluded by default v2.1.0.
+
+    Substrings checked use OS-agnostic '/' separator after normalization.
+    """
+    p = path.replace("\\", "/")
+    needles = (
+        "/site-packages/",
+        "/dist-packages/",
+        "/.venv/",
+        "/venv/",
+        "/env/",
+        "/.tox/",
+        "/.eggs/",
+    )
+    if any(n in p for n in needles):
+        return True
+    # /python3.X/lib/ — stdlib path
+    import re as _re
+    if _re.search(r"/python3\.[0-9]+/lib/", p):
+        return True
+    return False
+
+
+def fault_locate(root: Path, include_system_libs: bool = False) -> bool:
     """Locate suspicious lines using Ochiai SBFL formula.
     suspiciousness(s) = failed(s) / sqrt(total_failed * (failed(s) + passed(s)))
     Uses coverage.data.CoverageData for per-test context (10x faster than per-test runs).
@@ -3735,7 +3829,11 @@ def fault_locate(root: Path) -> bool:
     Returns False if a required dep is missing (coverage / pytest-cov);
     callers can `sys.exit(1)` on that. Returns True for "ran successfully"
     even if there's nothing to localize (no failing tests / no suspects /
-    timeout / collection error) — those aren't dep failures."""
+    timeout / collection error) — those aren't dep failures.
+
+    include_system_libs: when False (default v2.1.0), skip site-packages /
+    .venv / stdlib paths. Pass True to include them (legacy v2.0.0 behavior).
+    """
     cfg = _load_forge_config(root)
     top_n = cfg["ochiai_top_n"]
     cov_mod = _check_dep("coverage")
@@ -3843,10 +3941,16 @@ def fault_locate(root: Path) -> bool:
 
     # Build suspiciousness scores per line
     suspects: list[dict[str, Any]] = []
+    skipped_system = 0
     for src_file in cd.measured_files():
         # Skip test files
         basename = Path(src_file).name
         if basename.startswith("test_") or basename == "__init__.py":
+            continue
+
+        # Cycle 21A Fix 2 — exclude system / venv paths unless explicit override.
+        if not include_system_libs and _is_system_lib_path(src_file):
+            skipped_system += 1
             continue
 
         contexts_by_line = cd.contexts_by_lineno(src_file)
@@ -4082,12 +4186,21 @@ def _compute_complexity_score(file_path: Path) -> float:
 
 
 # === CARMACK: ENHANCED DEFECT PREDICTION (Kalman + Wavelet + KM + Modularity) ===
-def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]] | None:
+def predict_carmack(
+    root: Path,
+    weeks: int | None = None,
+    weeks_from: str | None = None,
+) -> list[dict[str, Any]] | None:
     """Cross-domain defect prediction. Replaces fixed weights with:
     - Kalman filter (adaptive risk from bugfix signal)
     - Haar wavelet (multi-scale churn decomposition)
     - Kaplan-Meier (survival probability per file)
-    - Newman modularity (import graph coupling)"""
+    - Newman modularity (import graph coupling)
+
+    Cycle 21A Fix 1 — weeks_from: ISO date (YYYY-MM-DD) or git ref (sha/
+    tag/branch) anchoring the --weeks window. When None (default), the
+    window is relative to system date (v2.0.0 behavior).
+    """
     cfg = _load_forge_config(root)
     if weeks is None:
         weeks = cfg["predict_horizon_weeks"]
@@ -4097,7 +4210,12 @@ def predict_carmack(root: Path, weeks: int | None = None) -> list[dict[str, Any]
         return None
     files = [f for f in tracked.split("\n") if f.strip()]
 
-    raw_log = _fetch_numstat_log(root, weeks)
+    ref_date = _resolve_ref_date(root, weeks_from) if weeks_from else None
+    if weeks_from and not ref_date:
+        print(f"  Warning: could not resolve --weeks-from {weeks_from!r} "
+              f"(not an ISO date YYYY-MM-DD, not a known git ref). "
+              f"Falling back to system date.")
+    raw_log = _fetch_numstat_log(root, weeks, ref_date=ref_date)
 
     file_stats: dict[str, dict[str, Any]] = {}
     for f in files:
@@ -4641,9 +4759,12 @@ USAGE
 ANALYTICS
   forge --predict [--weeks N]      rank files by churn-based defect risk
   forge --carmack [--weeks N]      multi-signal defect score (Kalman + wavelet + coupling)
+  forge --carmack --weeks-from <ISO_DATE_OR_SHA>   anchor history window to a date (fix BUG-014)
+  forge --shield --weeks-from <REF>     same anchor for shield orchestration
   forge --anomaly [--weeks N]      flag commits with anomalous activity
   forge --heatmap                  show per-file failure heatmap
   forge --locate                   Ochiai SBFL fault localization (needs coverage.py)
+  forge --locate --include-system-libs    include site-packages/.venv/stdlib in SBFL ranking
   forge --modularity               Newman-Girvan Q over the import graph
   forge --shield                   orchestrate carmack→gen-props→fast-deep with feedback (cycle 9)
   forge --install-hook             install git pre-commit hook (runs forge --fast-deep)
@@ -4690,11 +4811,12 @@ KNOWN_FLAGS = {
     "--shield", "--install-hook", "--uninstall-hook", "--force",
     "--snapshot-check", "--diff", "--verbose", "--include-destructive",
     "--incremental-mutate",
+    "--exclude-system-libs", "--include-system-libs",
     # flags that take a value
     "--bisect", "--add", "--close", "--minimize", "--gen-props",
     "--mutate", "--snapshot", "--paths-to-mutate", "--since",
     # numeric value flags (also accept "--flaky" without a value → default runs)
-    "--flaky", "--flaky-dtw", "--weeks",
+    "--flaky", "--flaky-dtw", "--weeks", "--weeks-from",
 }
 
 # Flags whose immediately-following arg must be a non-negative integer
@@ -4715,6 +4837,7 @@ _NUMERIC_VALUE_FLAGS = {"--weeks", "--flaky", "--flaky-dtw"}
 _REQUIRES_VALUE = {
     "--mutate", "--bisect", "--close", "--minimize", "--gen-props",
     "--snapshot", "--add", "--weeks", "--paths-to-mutate", "--since",
+    "--weeks-from",
 }
 
 # What kind of value each flag expects, for clearer error messages.
@@ -4727,6 +4850,7 @@ _VALUE_DESCRIPTION = {
     "--snapshot": "a command string to capture",
     "--add": "a bug description (multi-word ok)",
     "--weeks": "a non-negative integer (history horizon)",
+    "--weeks-from": "an ISO date (YYYY-MM-DD) or git ref (sha/tag/branch) — overrides system date for --weeks window",
     "--paths-to-mutate": "a path to the single file to mutate (validated)",
     "--since": "a git commit ref (sha, tag, branch) — baseline for --incremental-mutate",
 }
@@ -4848,7 +4972,13 @@ def main() -> None:
             wi = args.index("--weeks")
             if wi + 1 < len(args) and args[wi + 1].isdigit():
                 weeks = int(args[wi + 1])
-        predict_carmack(root, weeks)
+        # Cycle 21A Fix 1 — --weeks-from REF_DATE anchor (BUG-014)
+        weeks_from = None
+        if "--weeks-from" in args:
+            wfi = args.index("--weeks-from")
+            if wfi + 1 < len(args):
+                weeks_from = args[wfi + 1]
+        predict_carmack(root, weeks, weeks_from=weeks_from)
         return
 
     if "--anomaly" in args:
@@ -5044,7 +5174,14 @@ def main() -> None:
         return
 
     if "--locate" in args:
-        if not fault_locate(root):
+        # Cycle 21A Fix 2 — system-lib path filter, default ON.
+        if "--include-system-libs" in args:
+            include_sys = True
+        elif "--exclude-system-libs" in args:
+            include_sys = False
+        else:
+            include_sys = False  # default: exclude
+        if not fault_locate(root, include_system_libs=include_sys):
             sys.exit(1)
         return
 
@@ -5053,7 +5190,18 @@ def main() -> None:
         return
 
     if "--shield" in args:
-        run_shield(root)
+        # Cycle 21A Fix 1 — thread --weeks and --weeks-from to shield.
+        shield_weeks = 4
+        if "--weeks" in args:
+            wi = args.index("--weeks")
+            if wi + 1 < len(args) and args[wi + 1].isdigit():
+                shield_weeks = int(args[wi + 1])
+        shield_weeks_from = None
+        if "--weeks-from" in args:
+            wfi = args.index("--weeks-from")
+            if wfi + 1 < len(args):
+                shield_weeks_from = args[wfi + 1]
+        run_shield(root, weeks=shield_weeks, weeks_from=shield_weeks_from)
         return
 
     if "--install-hook" in args:
