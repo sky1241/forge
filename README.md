@@ -26,7 +26,7 @@ forge --shield   # orchestrate: predict → gen tests → run impacted
 
 See [BENCHMARK.md](BENCHMARK.md) for the 6 frictions admitted (test set asymmetry, mutmut crash, black skipped per timeout cap).
 
-## Honest Limits — full cycles 11→20 v7 (2026-05-11)
+## Honest Limits — full cycles 11→21 v8 (2026-05-12)
 
 forge has been tested through 10+ pre-registered scientific cycles on
 BugsInPy real Python bugs. Full methodology + verdicts public on
@@ -53,15 +53,17 @@ BugsInPy real Python bugs. Full methodology + verdicts public on
   `--bisect` / `--flaky`** : validated cycle 20 v2 on 30 real cases
   (5 projects × 6 tools, 100% ratio_ok with graceful exits).
 
-### Not recommended for production
+### Production-ready in v2.1.0 (was research-mode in v2.0.0)
 
-- **`forge --locate`** : Ochiai SBFL needs failing tests + path filter.
-  Research mode only (cycle 17 verdict: 6.7% top30 on BugsInPy PRE_BUG —
-  ranks system files without filter).
-- **`forge --shield`** : works on active projects (≥3 commits in
-  `--weeks N` window, default 4). Short-circuits gracefully on dormant
-  projects (cycle 18 v2: 11/11 active vs 0/9 dormant). Document
-  `--weeks N` to widen window before use on quiet repos.
+- **`forge --locate`** : `--exclude-system-libs` default ON since v2.1.0
+  filters site-packages / .venv / stdlib from SBFL ranking. Now usable
+  on real projects. Pass `--include-system-libs` to restore v2.0.0
+  legacy behavior.
+- **`forge --shield`** : now prints `[SHIELD WARNING]` + `[SHIELD HINT]`
+  on carmack short-circuit instead of silent skip (v2.1.0). Use
+  `--weeks-from <ISO_DATE_OR_SHA>` to anchor history window to a
+  historical commit instead of system date (fix BUG-014). Works on
+  active and dormant projects when window is anchored properly.
 
 ### Honest findings cycles 11→20
 
@@ -74,12 +76,12 @@ BugsInPy real Python bugs. Full methodology + verdicts public on
 | 19 v2 | Composite ablation drop kalman+wavelet | **AMBIGU** | Populations disjoint, hétérogène per-proj |
 | 20 v2 | Sanity at scale (5+ cases/tool) | **OUI ferme** | 6/6 tools 100% on 30 real cases |
 
-### Known bug — to fix in v2.1
+### Known bug — FIXED in v2.1.0
 
-`forge --shield` / `forge --carmack` `--weeks N` use system date, not
-PRE_BUG commit date. Affects benchmarks on historical commits
-(BugsInPy cycles 12, 17, 18 v1). Patch `--weeks-from REF_DATE` planned
-v2.1. See BUGS.md BUG-014.
+~~`forge --shield` / `forge --carmack` `--weeks N` use system date, not
+PRE_BUG commit date.~~ **Fixed in v2.1.0** via `--weeks-from <ISO_DATE_OR_SHA>`.
+Pass `--weeks-from 2020-01-15` to anchor window to that date, or
+`--weeks-from <git_ref>` to anchor to a commit. See BUGS.md BUG-014.
 
 ### Reproducibility
 

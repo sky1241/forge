@@ -15,8 +15,9 @@
 
 ## BUG-014: forge --shield/--carmack `--weeks N` uses system date
 
-- **Status**: OPEN, planned v2.1
-- **Date**: 2026-05-11
+- **Status**: **FIXED v2.1.0** (cycle 21A Fix 1)
+- **Date**: 2026-05-11 → fixed 2026-05-12
+- **Fix commit**: see PR #11 (cycle21_fixes branch)
 - **Symptom**: `forge --shield` short-circuits silently on commits older
   than `current_date - weeks`. `carmack` stage emits "No commits in last
   N weeks" then `shield` skips downstream stages (gen-props, fast-deep).
@@ -31,15 +32,14 @@
   - Benchmarks on historical commits (cycles 12, 17, 18 v1) invalidated
   - Sanity tests on dormant projects show shield "doesn't work" when
     it actually does — just lacks recent activity signal
-- **Fix planned**: add `--weeks-from REF_DATE` parameter to override
-  system date. Refactor `carmack` + `shield` to thread reference date
-  through stages. Backward-compatible: when `--weeks-from` absent,
-  use system date (current behavior).
-- **Workaround**:
-  - Run `forge --shield --weeks 52` (or larger) on dormant projects
-  - Use `forge --shield` on HEAD of active repos with recent commits
-    (see cycle 18 v2 methodology)
+- **Fix shipped v2.1.0**: `--weeks-from <ISO_DATE_OR_SHA>` flag added.
+  Threaded through `predict_carmack` + `run_shield`. Backward-compatible:
+  when `--weeks-from` absent, system date used (v2.0.0 behavior).
+  - `_resolve_ref_date(root, ref)` accepts ISO date `YYYY-MM-DD` OR
+    git ref (sha/tag/branch), resolved via `git show -s --format=%cI`
+  - `_fetch_numstat_log(root, weeks, ref_date)` uses `--until=<date>`
+    + `--since=<date> - N weeks` git arithmetic when ref_date provided
 - **Discovered**: cycle 18 v2 sub-population analysis (11/11 stages
   complete on active projects vs 0/9 on dormant).
-- **Test plan v2.1**: `tests/test_forge_real_algos.py::TestWeeksFrom`
-  with synthetic git history at fixed dates.
+- **Tests**: `TestCycle21WeeksFrom` (7 tests) — iso/sha/invalid/
+  historical-carmack/backward-compat/shield-propagate/known-flags.
